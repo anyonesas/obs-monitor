@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.6"
+VERSION      = "1.3.7"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -108,11 +108,11 @@ ALERT_B = "#b01a28"
 # Helpers macOS natif
 # ─────────────────────────────────────────────────────────────────────────────
 
-def boost_all_windows():
+def boost_all_windows(order_front=False):
     """
-    Passe TOUTES les fenêtres de l'app au niveau NSScreenSaverWindowLevel.
-    On ne filtre pas par ID (winfo_id ≠ windowNumber sur macOS) : on set tout.
-    Appelé au démarrage ET toutes les 5 s pour résister aux resets de macOS.
+    Passe TOUTES les fenêtres de l'app à NSScreenSaverWindowLevel.
+    order_front=True : appelle aussi orderFront_ pour passer devant les apps
+    plein-écran (ex: OBS Projector). Nécessaire quand une alerte est active.
     """
     if not HAVE_APPKIT:
         return
@@ -124,12 +124,13 @@ def boost_all_windows():
             try:
                 ns_win.setLevel_(level)
                 ns_win.setCollectionBehavior_(behavior)
+                if order_front:
+                    ns_win.orderFront_(None)
             except Exception:
                 pass
     except Exception:
         pass
 
-# Alias pour compatibilité avec les anciens appels
 def boost_window(tk_win, high=True):
     boost_all_windows()
 
@@ -178,16 +179,19 @@ def check_for_update():
 
 def install_update(dmg_url, app_path, on_progress=None):
     """
-    Télécharge le DMG, monte, copie le .app, démonte, relance.
-    app_path = chemin absolu vers l'OBSMonitor.app en cours d'utilisation.
+    Télécharge le DMG, monte, puis lance un script shell qui :
+      - attend que l'app courante quitte (plus de verrou de fichier)
+      - remplace le .app
+      - relance la nouvelle version
+    L'app quitte proprement avec sys.exit() pendant ce temps.
     """
     try:
-        # 1. Téléchargement via curl (SSL fiable même dans app bundlée)
+        # 1. Téléchargement
         tmp_dmg = os.path.join(tempfile.gettempdir(), "OBSMonitor_update.dmg")
         if on_progress: on_progress("Téléchargement…")
         subprocess.run(
-            ["curl", "-L", "-o", tmp_dmg, "--max-time", "120", dmg_url],
-            check=True, capture_output=True
+            ["curl", "-L", "-o", tmp_dmg, "--max-time", "180", dmg_url],
+            check=True
         )
 
         # 2. Montage
@@ -197,21 +201,35 @@ def install_update(dmg_url, app_path, on_progress=None):
                         "-mountpoint", mnt, "-quiet", "-nobrowse"],
                        check=True)
 
-        # 3. Copie du .app
         src_app = os.path.join(mnt, "OBSMonitor.app")
-        dst_app = app_path  # remplace l'app en cours
-        if os.path.exists(dst_app):
-            shutil.rmtree(dst_app)
-        shutil.copytree(src_app, dst_app)
+        dst_app = app_path
 
-        # 4. Démontage
-        subprocess.run(["hdiutil", "detach", mnt, "-quiet"], check=False)
-        os.remove(tmp_dmg)
+        # 3. Script qui attend la fin de l'app puis remplace et relance
+        pid = os.getpid()
+        script = f"""#!/bin/bash
+# Attend que l'app courante se ferme
+while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
+sleep 0.5
+# Remplace le .app
+rm -rf "{dst_app}"
+cp -R "{src_app}" "{dst_app}"
+# Nettoie
+hdiutil detach "{mnt}" -quiet 2>/dev/null || true
+rm -f "{tmp_dmg}"
+# Relance la nouvelle version
+open "{dst_app}"
+"""
+        script_path = os.path.join(tempfile.gettempdir(), "obs_monitor_update.sh")
+        with open(script_path, "w") as f:
+            f.write(script)
+        os.chmod(script_path, 0o755)
+        subprocess.Popen(["bash", script_path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 5. Redémarrage
+        # 4. Quitte l'app — le script prend le relais
         if on_progress: on_progress("Redémarrage…")
-        exe = os.path.join(dst_app, "Contents", "MacOS", "OBSMonitor")
-        os.execv(exe, [exe])   # remplace le process actuel → redémarre proprement
+        time.sleep(0.8)
+        os.kill(os.getpid(), 9)   # force quit propre
 
     except Exception as e:
         if on_progress: on_progress(f"Erreur : {e}")
@@ -583,6 +601,9 @@ class AlertBanner:
             win.configure(bg=bg)
             self._recolor(win, bg)
             win.attributes("-alpha", 0.93)
+        # Force les bannières au premier plan à chaque flash —
+        # indispensable pour passer devant OBS Projector plein écran
+        boost_all_windows(order_front=True)
 
     def _recolor(self, w, bg):
         try:
@@ -594,8 +615,10 @@ class AlertBanner:
             self._recolor(child, bg)
 
     def hide(self):
+        # alpha=0.01 et non 0.0 : une fenêtre à alpha=0 quitte les espaces
+        # Mission Control et ne repart plus devant OBS fullscreen.
         for win in self._wins:
-            win.attributes("-alpha", 0.0)
+            win.attributes("-alpha", 0.01)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
