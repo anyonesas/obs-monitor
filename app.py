@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.7"
+VERSION      = "1.3.8"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -176,6 +176,29 @@ def check_for_update():
     except Exception as e:
         print(f"[update] exception: {e}")
     return None, None
+
+def _real_app_path():
+    """
+    Retourne le chemin réel du .app, même sous App Translocation (Gatekeeper).
+    Si macOS a déplacé l'app dans /private/var/folders/.../AppTranslocation/...,
+    on installe dans /Applications/OBSMonitor.app à la place.
+    """
+    # Méthode 1 : NSBundle donne le chemin du bundle en cours
+    if HAVE_APPKIT:
+        try:
+            path = str(AppKit.NSBundle.mainBundle().bundlePath())
+            if "AppTranslocation" not in path and "/var/folders" not in path:
+                return path
+        except Exception:
+            pass
+    # Méthode 2 : chemin relatif à sys.executable
+    candidate = os.path.abspath(
+        os.path.join(os.path.dirname(sys.executable), "..", "..", "..")
+    )
+    if "AppTranslocation" in candidate or "/var/folders" in candidate:
+        # App sous translocation → installe dans /Applications
+        return "/Applications/OBSMonitor.app"
+    return candidate
 
 def install_update(dmg_url, app_path, on_progress=None):
     """
@@ -852,9 +875,7 @@ class ControlPanel:
         if not self._update_url:
             return
         self._set_update_banner(ORANGE, "⏳  Téléchargement en cours…")
-        app_path = os.path.abspath(
-            os.path.join(os.path.dirname(sys.executable), "..", "..", "..")
-        )
+        app_path = _real_app_path()
         def on_progress(msg):
             self._root.after(0, lambda m=msg: self._set_update_banner(ORANGE, f"⏳  {m}"))
         threading.Thread(
