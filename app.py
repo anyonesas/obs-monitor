@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.0"
+VERSION      = "1.3.1"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -138,12 +138,21 @@ def version_tuple(v):
     return tuple(int(x) for x in v.lstrip("v").split("."))
 
 def check_for_update():
-    """Vérifie la dernière release GitHub. Retourne (version, dmg_url) ou (None, None)."""
+    """
+    Vérifie la dernière release GitHub.
+    Utilise curl (toujours dispo sur macOS, certificats SSL système garantis).
+    Retourne (version, dmg_url) ou (None, None).
+    """
     try:
-        req = urllib.request.Request(UPDATE_API,
-              headers={"User-Agent": "OBSMonitor/" + VERSION})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read())
+        result = subprocess.run(
+            ["curl", "-s", "-L", "--max-time", "10",
+             "-H", f"User-Agent: OBSMonitor/{VERSION}",
+             UPDATE_API],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None, None
+        data = json.loads(result.stdout)
         latest = data.get("tag_name", "").lstrip("v")
         if not latest:
             return None, None
@@ -163,10 +172,13 @@ def install_update(dmg_url, app_path, on_progress=None):
     app_path = chemin absolu vers l'OBSMonitor.app en cours d'utilisation.
     """
     try:
-        # 1. Téléchargement
+        # 1. Téléchargement via curl (SSL fiable même dans app bundlée)
         tmp_dmg = os.path.join(tempfile.gettempdir(), "OBSMonitor_update.dmg")
         if on_progress: on_progress("Téléchargement…")
-        urllib.request.urlretrieve(dmg_url, tmp_dmg)
+        subprocess.run(
+            ["curl", "-L", "-o", tmp_dmg, "--max-time", "120", dmg_url],
+            check=True, capture_output=True
+        )
 
         # 2. Montage
         if on_progress: on_progress("Installation…")
@@ -804,14 +816,28 @@ class ControlPanel:
         """Appelé depuis le thread d'update quand une nouvelle version est dispo."""
         self._update_ver = version
         self._update_url = url
-        self._update_btn.configure(text=f"🔄  v{version} dispo !")
-        self._update_btn.pack(side="right", padx=4)
+        # Bandeau bien visible sous la barre de titre
+        if not hasattr(self, "_update_banner") or not self._update_banner.winfo_exists():
+            self._update_banner = tk.Frame(self._root, bg=GREEN, cursor="hand2")
+            self._update_banner.pack(fill="x", after=self._bar)
+            lbl = tk.Label(
+                self._update_banner,
+                text=f"🔄  Mise à jour v{version} disponible — cliquer pour installer",
+                fg=BG, bg=GREEN,
+                font=("SF Pro Display", 10, "bold"), pady=6, cursor="hand2"
+            )
+            lbl.pack()
+            for w in [self._update_banner, lbl]:
+                w.bind("<Button-1>", lambda e: self._do_update())
         self._autosize()
 
     def _do_update(self):
         if not self._update_url:
             return
-        self._update_btn.configure(text="⏳ …", bg=ORANGE)
+        if hasattr(self, "_update_banner") and self._update_banner.winfo_exists():
+            for w in self._update_banner.winfo_children():
+                w.configure(text="⏳  Installation en cours…", bg=ORANGE, fg=BG)
+            self._update_banner.configure(bg=ORANGE)
         app_path = os.path.abspath(
             os.path.join(os.path.dirname(sys.executable), "..", "..", "..")
         )
