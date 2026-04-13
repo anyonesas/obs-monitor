@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.3"
+VERSION      = "1.3.4"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -139,9 +139,9 @@ def version_tuple(v):
 
 def check_for_update():
     """
-    Vérifie la dernière release GitHub.
-    Utilise curl (toujours dispo sur macOS, certificats SSL système garantis).
+    Vérifie la dernière release GitHub via curl (SSL fiable sur macOS bundlé).
     Retourne (version, dmg_url) ou (None, None).
+    Loggue les erreurs pour faciliter le diagnostic.
     """
     try:
         result = subprocess.run(
@@ -150,20 +150,30 @@ def check_for_update():
              UPDATE_API],
             capture_output=True, text=True, timeout=15
         )
-        if result.returncode != 0 or not result.stdout.strip():
+        if result.returncode != 0:
+            print(f"[update] curl error code {result.returncode}: {result.stderr[:200]}")
+            return None, None
+        if not result.stdout.strip():
+            print("[update] curl returned empty response")
             return None, None
         data = json.loads(result.stdout)
+        # Vérification de rate-limit GitHub
+        if "message" in data:
+            print(f"[update] GitHub API: {data['message']}")
+            return None, None
         latest = data.get("tag_name", "").lstrip("v")
+        print(f"[update] latest={latest!r}  current={VERSION!r}")
         if not latest:
             return None, None
         if version_tuple(latest) <= version_tuple(VERSION):
+            print("[update] déjà à jour")
             return None, None
-        # Cherche le .dmg dans les assets
         for asset in data.get("assets", []):
             if asset["name"].endswith(".dmg"):
                 return latest, asset["browser_download_url"]
-    except Exception:
-        pass
+        print("[update] aucun .dmg trouvé dans les assets")
+    except Exception as e:
+        print(f"[update] exception: {e}")
     return None, None
 
 def install_update(dmg_url, app_path, on_progress=None):
@@ -606,7 +616,6 @@ class ControlPanel:
         self._video_vars  = {}
         self._known_audio = []
         self._known_video = []
-        self._info_open   = False
 
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
@@ -735,15 +744,24 @@ class ControlPanel:
         )
         self._video_placeholder.pack(anchor="w")
 
+        # ── Bouton Enregistrer la sélection
+        self._save_btn = tk.Label(
+            r, text="💾  Enregistrer la sélection",
+            fg=BG, bg=ACCENT,
+            font=("SF Pro Display", 10, "bold"),
+            cursor="hand2", pady=5
+        )
+        self._save_btn.pack(fill="x", padx=14, pady=(6, 2))
+        self._save_btn.bind("<Button-1>", lambda e: self._save_sources())
+
         # ── Problèmes détectés (toujours dans le DOM, juste vide si aucun)
         self._issues_sep   = tk.Frame(r, bg=BORDER, height=1)
         self._issues_frame = tk.Frame(r, bg=BG)
         self._issue_labels = []
-        # Pack immédiatement pour fixer l'ordre — sera invisible si vide
         self._issues_sep.pack(fill="x", padx=8, pady=4)
         self._issues_frame.pack(fill="x", padx=14, pady=(0, 4))
 
-        # ── Section "Ce qui est surveillé"
+        # ── Section "Ce qui est surveillé" — grille compacte
         self._sep()
         self._build_info_section()
 
@@ -758,58 +776,31 @@ class ControlPanel:
         ).pack(anchor="w", padx=14, pady=(4, 3))
 
     def _build_info_section(self):
-        """Section accordéon expliquant la logique de détection."""
-        toggle_frame = tk.Frame(self._root, bg=BG, cursor="hand2")
-        toggle_frame.pack(fill="x", padx=14, pady=(2, 0))
+        """Grille compacte 2 colonnes — ce qui est surveillé."""
+        tk.Label(self._root, text="CE QUI EST SURVEILLÉ",
+                 fg=FG2, bg=BG,
+                 font=("SF Pro Display", 9, "bold")
+                 ).pack(anchor="w", padx=14, pady=(4, 3))
 
-        self._info_arrow = tk.Label(
-            toggle_frame, text="▶  CE QUI EST SURVEILLÉ",
-            fg=ACCENT, bg=BG,
-            font=("SF Pro Display", 9, "bold"), cursor="hand2"
-        )
-        self._info_arrow.pack(side="left")
+        grid = tk.Frame(self._root, bg=BG)
+        grid.pack(fill="x", padx=14, pady=(0, 8))
 
-        self._info_body = tk.Frame(self._root, bg=BG3)
-
-        cfg_a = self._cfg["checks"]["audio"]
-        cfg_v = self._cfg["checks"]["video"]
-
-        rows = [
-            (YELLOW,  "🎤  SILENCE",
-             f"Aucun son pendant {cfg_a['silence_duration_s']}s\n"
-             f"(seuil de détection : {cfg_a['silence_db']} dB)"),
-            (CYAN,    "🐝  BOURDONNEMENT",
-             f"Son trop constant : variation < {cfg_a['flat_std_db']} dB sur 7s\n"
-             "Indique un micro bloqué ou un bruit fixe (zzzzz)"),
-            (RED,     "🔴  SATURATION CHRONIQUE",
-             f"Signal en écrêtage plus de {int(cfg_a['clip_ratio']*100)}% du temps\n"
-             f"(seuil clip : {cfg_a['clip_db']} dB)"),
-            (ORANGE,  "🔊  ÉCRÊTAGE PONCTUEL",
-             f"Pic de niveau ≥ {cfg_a['clip_db']} dB"),
-            (FG2,     "📷  IMAGE NOIRE",
-             f"Luminosité moyenne < {cfg_v['dark_threshold']}/255\n"
-             "Compare la luminosité moyenne de chaque pixel en niveaux de gris"),
-            (FG,      "💡  SUREXPOSÉE",
-             f"Luminosité moyenne > {cfg_v['bright_threshold']}/255"),
-            (ACCENT,  "🧊  IMAGE FIGÉE",
-             f"Similarité inter-frames > {cfg_v['freeze_threshold']*100:.1f}%"
-             f" pendant {cfg_v['freeze_duration_s']}s\n"
-             "Screenshot toutes les 2s, réduit à 80×45px, comparé pixel par pixel"),
+        items = [
+            (YELLOW, "🎤 Silence"),
+            (CYAN,   "🐝 Bourdonnement"),
+            (RED,    "🔴 Saturation"),
+            (ORANGE, "🔊 Écrêtage"),
+            (FG2,    "📷 Image noire"),
+            (FG,     "💡 Surexposée"),
+            (ACCENT, "🧊 Figée"),
         ]
 
-        for color, title, desc in rows:
-            row = tk.Frame(self._info_body, bg=BG3)
-            row.pack(fill="x", padx=10, pady=(6, 0))
-            tk.Label(row, text=title, fg=color, bg=BG3,
-                     font=("SF Pro Display", 10, "bold"), anchor="w").pack(anchor="w")
-            tk.Label(row, text=desc, fg=FG2, bg=BG3,
-                     font=("SF Pro Display", 9), anchor="w",
-                     justify="left", wraplength=255).pack(anchor="w")
-
-        tk.Frame(self._info_body, bg=BG3, height=8).pack()
-
-        for w in [toggle_frame, self._info_arrow]:
-            w.bind("<Button-1>", self._toggle_info)
+        for i, (color, label) in enumerate(items):
+            col = i % 2
+            row = i // 2
+            tk.Label(grid, text=label, fg=color, bg=BG,
+                     font=("SF Pro Display", 10), anchor="w"
+                     ).grid(row=row, column=col, sticky="w", padx=(0, 8), pady=1)
 
     def notify_update(self, version, url):
         """Appelé depuis le thread d'update quand une nouvelle version est dispo."""
@@ -874,15 +865,23 @@ class ControlPanel:
         y = self._root.winfo_y()
         self._root.geometry(f"{self.W}x{h}+{x}+{y}")
 
-    def _toggle_info(self, _=None):
-        self._info_open = not self._info_open
-        if self._info_open:
-            self._info_arrow.configure(text="▼  CE QUI EST SURVEILLÉ")
-            self._info_body.pack(fill="x", padx=8, pady=(2, 6))
-        else:
-            self._info_arrow.configure(text="▶  CE QUI EST SURVEILLÉ")
-            self._info_body.pack_forget()
-        self._autosize()
+    def _save_sources(self):
+        """Enregistre explicitement la sélection audio+vidéo et donne un retour visuel."""
+        mon_a = [n for n, v in self._audio_vars.items() if v.get()]
+        if len(mon_a) == len(self._audio_vars):
+            mon_a = []
+        mon_v = [n for n, v in self._video_vars.items() if v.get()]
+        if len(mon_v) == len(self._video_vars):
+            mon_v = []
+        self._cfg["checks"]["audio"]["monitor_inputs"] = mon_a
+        self._cfg["checks"]["video"]["monitor_sources"] = mon_v
+        self._audio_mon.cfg = self._cfg["checks"]["audio"]
+        self._video_mon.cfg = self._cfg["checks"]["video"]
+        save_config(self._cfg)
+        # Retour visuel bref
+        self._save_btn.configure(text="✓  Sélection enregistrée !", bg=GREEN)
+        self._root.after(1800, lambda: self._save_btn.configure(
+            text="💾  Enregistrer la sélection", bg=ACCENT))
 
     # ── Drag ──────────────────────────────────────────────────────────────────
 
