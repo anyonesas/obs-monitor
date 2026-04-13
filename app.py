@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.2.0"
+VERSION      = "1.3.0"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -108,19 +108,22 @@ ALERT_B = "#b01a28"
 # Helpers macOS natif
 # ─────────────────────────────────────────────────────────────────────────────
 
-def boost_window(tk_win):
+def boost_window(tk_win, high=True):
     """
-    Passe une fenêtre tkinter au niveau NSScreenSaverWindowLevel (au-dessus
-    de tout — OBS, navigateurs, plein-écran) et la rend visible sur tous les
-    espaces Mission Control.
+    Passe une fenêtre tkinter au niveau voulu :
+      high=True  → NSScreenSaverWindowLevel (au-dessus de TOUT — bannière d'alerte)
+      high=False → NSFloatingWindowLevel    (au-dessus d'OBS, mais les autres apps
+                                             peuvent passer devant — panneau de contrôle)
     """
     if not HAVE_APPKIT:
         return
     try:
+        level = (AppKit.NSScreenSaverWindowLevel
+                 if high else AppKit.NSFloatingWindowLevel)
         wid = tk_win.winfo_id()
         for ns_win in AppKit.NSApp.windows():
             if ns_win.windowNumber() == wid:
-                ns_win.setLevel_(AppKit.NSScreenSaverWindowLevel)
+                ns_win.setLevel_(level)
                 ns_win.setCollectionBehavior_(
                     AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
                     AppKit.NSWindowCollectionBehaviorStationary |
@@ -612,7 +615,9 @@ class ControlPanel:
         self._build()
         self._autosize()
         root.deiconify()                  # réaffiche sans barre native
-        root.after(300, lambda: boost_window(root))
+        # Panneau : NSFloatingWindowLevel — au-dessus d'OBS, mais d'autres apps
+        # peuvent passer devant si besoin
+        root.after(300, lambda: boost_window(root, high=False))
         self._enable_drag()
 
     # ── Construction ──────────────────────────────────────────────────────────
@@ -620,8 +625,8 @@ class ControlPanel:
     def _build(self):
         r = self._root
 
-        # ── Barre de titre (propre, sans les dots macOS)
-        bar = tk.Frame(r, bg=BG2, height=36)
+        # ── Barre de titre (propre, sans les dots macOS) — sert aussi d'ancre pour le drag
+        self._bar = bar = tk.Frame(r, bg=BG2, height=36)
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
@@ -857,19 +862,22 @@ class ControlPanel:
     # ── Drag ──────────────────────────────────────────────────────────────────
 
     def _enable_drag(self):
+        """Drag lié UNIQUEMENT à la barre de titre pour ne pas interférer
+        avec les checkboxes et autres contrôles du panneau."""
         self._dx = self._dy = 0
 
         def start(e):
-            self._dx = e.x
-            self._dy = e.y
+            self._dx = e.x_root - self._root.winfo_x()
+            self._dy = e.y_root - self._root.winfo_y()
 
         def move(e):
-            x = self._root.winfo_x() + e.x - self._dx
-            y = self._root.winfo_y() + e.y - self._dy
+            x = e.x_root - self._dx
+            y = e.y_root - self._dy
             self._root.geometry(f"+{x}+{y}")
 
-        self._root.bind("<ButtonPress-1>", start)
-        self._root.bind("<B1-Motion>",     move)
+        # On lie sur self._bar (barre de titre) + ses enfants directs via propagation
+        self._bar.bind("<ButtonPress-1>", start)
+        self._bar.bind("<B1-Motion>",     move)
 
     # ── Mise à jour dynamique ─────────────────────────────────────────────────
 
