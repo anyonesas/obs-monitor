@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.4"
+VERSION      = "1.3.5"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -824,20 +824,28 @@ class ControlPanel:
     def _do_update(self):
         if not self._update_url:
             return
-        if hasattr(self, "_update_banner") and self._update_banner.winfo_exists():
-            for w in self._update_banner.winfo_children():
-                w.configure(text="⏳  Installation en cours…", bg=ORANGE, fg=BG)
-            self._update_banner.configure(bg=ORANGE)
+        self._set_update_banner(ORANGE, "⏳  Téléchargement en cours…")
         app_path = os.path.abspath(
             os.path.join(os.path.dirname(sys.executable), "..", "..", "..")
         )
+        def on_progress(msg):
+            self._root.after(0, lambda m=msg: self._set_update_banner(ORANGE, f"⏳  {m}"))
         threading.Thread(
             target=install_update,
-            args=(self._update_url, app_path,
-                  lambda msg: self._root.after(0,
-                      lambda: self._update_btn.configure(text=msg))),
+            args=(self._update_url, app_path, on_progress),
             daemon=True
         ).start()
+
+    def _set_update_banner(self, color, text):
+        """Met à jour le bandeau de mise à jour (crée si nécessaire)."""
+        if not hasattr(self, "_update_banner") or not self._update_banner.winfo_exists():
+            return
+        self._update_banner.configure(bg=color)
+        for w in self._update_banner.winfo_children():
+            try:
+                w.configure(bg=color, fg=BG, text=text)
+            except Exception:
+                pass
 
     def _toggle_config_panel(self):
         self._cfg_open = not self._cfg_open
