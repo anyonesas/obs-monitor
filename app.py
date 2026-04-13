@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.8"
+VERSION      = "1.3.9"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -108,21 +108,28 @@ ALERT_B = "#b01a28"
 # Helpers macOS natif
 # ─────────────────────────────────────────────────────────────────────────────
 
-def boost_all_windows(order_front=False):
+def boost_all_windows(order_front=False, banner_wins=None):
     """
-    Passe TOUTES les fenêtres de l'app à NSScreenSaverWindowLevel.
-    order_front=True : appelle aussi orderFront_ pour passer devant les apps
-    plein-écran (ex: OBS Projector). Nécessaire quand une alerte est active.
+    Niveaux de fenêtre :
+      - Panneau de contrôle → NSScreenSaverWindowLevel (1000)
+      - Bannières d'alerte  → NSScreenSaverWindowLevel + 1 (1001)
+        OBS Projector "always on top" est à 1000, on passe au-dessus.
+    banner_wins : set des winfo_id() des fenêtres bannières (niveau 1001).
+    order_front : appelle orderFront_ après avoir fixé le niveau.
     """
     if not HAVE_APPKIT:
         return
     try:
-        level    = AppKit.NSScreenSaverWindowLevel
+        level_panel  = AppKit.NSScreenSaverWindowLevel
+        level_banner = AppKit.NSScreenSaverWindowLevel + 1
         behavior = (AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
                     AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
+        ids = set(banner_wins) if banner_wins else set()
         for ns_win in AppKit.NSApp.windows():
             try:
-                ns_win.setLevel_(level)
+                wid = ns_win.windowNumber()
+                lvl = level_banner if wid in ids else level_panel
+                ns_win.setLevel_(lvl)
                 ns_win.setCollectionBehavior_(behavior)
                 if order_front:
                     ns_win.orderFront_(None)
@@ -594,9 +601,27 @@ class AlertBanner:
         # Boost niveau macOS après un court délai (fenêtres doivent être affichées)
         root.after(300, self._boost_all)
 
+    def _banner_ns_ids(self):
+        """Retourne les windowNumber() Cocoa des fenêtres bannières."""
+        ids = set()
+        if not HAVE_APPKIT:
+            return ids
+        tk_ids = {win.winfo_id() for win in self._wins}
+        for ns_win in AppKit.NSApp.windows():
+            try:
+                if ns_win.windowNumber() in tk_ids:
+                    ids.add(ns_win.windowNumber())
+            except Exception:
+                pass
+        # Fallback : si le matching par ID échoue, toutes les fenêtres sauf la première
+        # (le panneau principal) → on les met toutes à niveau élevé, c'est safe.
+        if not ids:
+            wins = list(AppKit.NSApp.windows())
+            ids = {w.windowNumber() for w in wins}
+        return ids
+
     def _boost_all(self):
-        for win in self._wins:
-            boost_window(win)
+        boost_all_windows(banner_wins=self._banner_ns_ids())
 
     def _drag_start(self, e):
         self._drag_anchor = e.y_root - self._wins[0].winfo_y()
@@ -624,9 +649,8 @@ class AlertBanner:
             win.configure(bg=bg)
             self._recolor(win, bg)
             win.attributes("-alpha", 0.93)
-        # Force les bannières au premier plan à chaque flash —
-        # indispensable pour passer devant OBS Projector plein écran
-        boost_all_windows(order_front=True)
+        # Force les bannières au premier plan à chaque flash (niveau 1001 > OBS 1000)
+        boost_all_windows(order_front=True, banner_wins=self._banner_ns_ids())
 
     def _recolor(self, w, bg):
         try:
