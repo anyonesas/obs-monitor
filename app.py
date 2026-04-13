@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.1"
+VERSION      = "1.3.2"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -627,9 +627,8 @@ class ControlPanel:
         self._build()
         self._autosize()
         root.deiconify()                  # réaffiche sans barre native
-        # Panneau : NSFloatingWindowLevel — au-dessus d'OBS, mais d'autres apps
-        # peuvent passer devant si besoin
-        root.after(300, lambda: boost_window(root, high=False))
+        # Panneau : NSScreenSaverWindowLevel — toujours au-dessus de tout, OBS inclus
+        root.after(300, lambda: boost_window(root, high=True))
         self._enable_drag()
 
     # ── Construction ──────────────────────────────────────────────────────────
