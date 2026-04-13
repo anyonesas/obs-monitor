@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.9"
+VERSION      = "1.4.0"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -37,8 +37,11 @@ except ImportError:
     sys.exit("pip install obsws-python")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Config dans ~/.config/obsmonitor/ — persiste entre les mises à jour
+CONFIG_DIR  = os.path.join(os.path.expanduser("~"), ".config", "obsmonitor")
+os.makedirs(CONFIG_DIR, exist_ok=True)
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "obs": {"host": "localhost", "port": 4455, "password": ""},
@@ -121,18 +124,20 @@ def boost_all_windows(order_front=False, banner_wins=None):
         return
     try:
         level_panel  = AppKit.NSScreenSaverWindowLevel
-        level_banner = AppKit.NSScreenSaverWindowLevel + 1
+        level_banner = AppKit.NSScreenSaverWindowLevel + 100  # bien au-dessus d'OBS
         behavior = (AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
                     AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
         ids = set(banner_wins) if banner_wins else set()
         for ns_win in AppKit.NSApp.windows():
             try:
                 wid = ns_win.windowNumber()
-                lvl = level_banner if wid in ids else level_panel
+                lvl = level_banner if (ids and wid in ids) else level_panel
                 ns_win.setLevel_(lvl)
                 ns_win.setCollectionBehavior_(behavior)
                 if order_front:
-                    ns_win.orderFront_(None)
+                    # orderFrontRegardless fonctionne même quand notre app
+                    # n'est pas l'app active — indispensable contre OBS Projector
+                    ns_win.orderFrontRegardless()
             except Exception:
                 pass
     except Exception:
@@ -550,11 +555,12 @@ class AlertBanner:
     H = 76
 
     def __init__(self, root, saved_y=None):
-        self._root    = root
-        self._screens = get_all_screens()   # [(sx, sy, sw, sh), ...]
-        self._wins    = []                  # une Toplevel par écran
-        self._tvars   = []                  # (title_var, body_var) par écran
-        self._drag_anchor = 0
+        self._root         = root
+        self._screens      = get_all_screens()
+        self._wins         = []
+        self._tvars        = []
+        self._drag_anchor  = 0
+        self._dismissed_until = 0   # timestamp jusqu'auquel le bandeau est masqué
 
         for i, (sx, sy, sw, sh) in enumerate(self._screens):
             y = int(saved_y) if (saved_y is not None and i == 0) else sy + 24
@@ -563,12 +569,25 @@ class AlertBanner:
             win = tk.Toplevel(root)
             win.overrideredirect(True)
             win.attributes("-topmost", True)
-            win.attributes("-alpha", 0.0)
+            win.attributes("-alpha", 0.01)
             win.geometry(f"{sw}x{self.H}+{sx}+{y}")
             win.configure(bg=ALERT_A)
 
-            # Barre jaune
+            # Barre jaune à gauche
             tk.Frame(win, width=5, bg=YELLOW).pack(side="left", fill="y")
+
+            # Bouton ✕ à droite (masque 5 min)
+            close_btn = tk.Label(win, text="✕", bg=ALERT_A, fg="#884444",
+                                 font=("SF Pro Display", 16, "bold"),
+                                 cursor="hand2", padx=12)
+            close_btn.pack(side="right", fill="y")
+            close_btn.bind("<Button-1>", lambda e: self._dismiss())
+
+            # Bouton déplacement
+            drag_lbl = tk.Label(win, text="↕", bg=ALERT_A, fg="#884444",
+                                font=("SF Pro Display", 18),
+                                cursor="sb_v_double_arrow")
+            drag_lbl.pack(side="right", padx=4)
 
             content = tk.Frame(win, bg=ALERT_A)
             content.pack(side="left", fill="both", expand=True, padx=(10, 0))
@@ -583,13 +602,8 @@ class AlertBanner:
             tk.Label(content, textvariable=body_var,
                      bg=ALERT_A, fg="#ffcccc",
                      font=("SF Pro Display", 10),
-                     anchor="w", wraplength=sw - 120, justify="left"
+                     anchor="w", wraplength=sw - 160, justify="left"
                      ).pack(fill="x")
-
-            drag_lbl = tk.Label(win, text="↕", bg=ALERT_A, fg="#884444",
-                                font=("SF Pro Display", 18),
-                                cursor="sb_v_double_arrow")
-            drag_lbl.pack(side="right", padx=14)
 
             for w in [win, content, drag_lbl]:
                 w.bind("<ButtonPress-1>", self._drag_start)
@@ -597,6 +611,11 @@ class AlertBanner:
 
             self._wins.append(win)
             self._tvars.append((title_var, body_var))
+
+    def _dismiss(self):
+        """Masque le bandeau pendant 5 minutes."""
+        self._dismissed_until = time.time() + 300
+        self.hide()
 
         # Boost niveau macOS après un court délai (fenêtres doivent être affichées)
         root.after(300, self._boost_all)
@@ -638,6 +657,9 @@ class AlertBanner:
         return self._wins[0].winfo_y() if self._wins else 24
 
     def show(self, issues, flash_state):
+        # Respecte le dismiss de 5 min
+        if time.time() < self._dismissed_until:
+            return
         n     = len(issues)
         title = f"⚠   {n} PROBLÈME{'S' if n > 1 else ''} DÉTECTÉ{'S' if n > 1 else ''}"
         body  = "   ·   ".join(i.split("  —")[0].strip() for i in issues)
@@ -816,17 +838,18 @@ class ControlPanel:
         )
         self._video_placeholder.pack(anchor="w")
 
-        # ── Bouton Enregistrer la sélection (tk.Button natif — plus fiable à NSScreenSaverWindowLevel)
-        self._save_btn = tk.Button(
-            r, text="💾  Enregistrer la sélection",
+        # ── Bouton Enregistrer — Frame colorée + Label (macOS ignore bg des tk.Button)
+        save_frame = tk.Frame(r, bg=ACCENT, cursor="hand2")
+        save_frame.pack(fill="x", padx=14, pady=(6, 2))
+        self._save_btn = tk.Label(
+            save_frame, text="💾  Enregistrer la sélection",
             fg=BG, bg=ACCENT,
             font=("SF Pro Display", 10, "bold"),
-            cursor="hand2", pady=4,
-            relief="flat", bd=0,
-            activebackground=ACCENT, activeforeground=BG,
-            command=self._save_sources
+            cursor="hand2", pady=5
         )
-        self._save_btn.pack(fill="x", padx=14, pady=(6, 2))
+        self._save_btn.pack(fill="x")
+        save_frame.bind("<Button-1>", lambda e: self._save_sources())
+        self._save_btn.bind("<Button-1>", lambda e: self._save_sources())
 
         # ── Problèmes détectés (toujours dans le DOM, juste vide si aucun)
         self._issues_sep   = tk.Frame(r, bg=BORDER, height=1)
@@ -886,11 +909,12 @@ class ControlPanel:
             self._update_banner.pack(fill="x", after=self._bar)
             lbl = tk.Label(
                 self._update_banner,
-                text=f"🔄  Mise à jour v{version} disponible — cliquer pour installer",
+                text=f"🔄  v{version} dispo — cliquer pour installer",
                 fg=BG, bg=GREEN,
-                font=("SF Pro Display", 10, "bold"), pady=6, cursor="hand2"
+                font=("SF Pro Display", 10, "bold"), pady=6,
+                wraplength=self.W - 16, justify="center", cursor="hand2"
             )
-            lbl.pack()
+            lbl.pack(fill="x", padx=8)
             for w in [self._update_banner, lbl]:
                 w.bind("<Button-1>", lambda e: self._do_update())
         self._autosize()
@@ -958,10 +982,13 @@ class ControlPanel:
         self._audio_mon.cfg = self._cfg["checks"]["audio"]
         self._video_mon.cfg = self._cfg["checks"]["video"]
         save_config(self._cfg)
-        # Retour visuel bref
+        # Retour visuel — met les deux (frame + label) en vert
         self._save_btn.configure(text="✓  Sélection enregistrée !", bg=GREEN)
-        self._root.after(1800, lambda: self._save_btn.configure(
-            text="💾  Enregistrer la sélection", bg=ACCENT))
+        self._save_btn.master.configure(bg=GREEN)
+        def _reset():
+            self._save_btn.configure(text="💾  Enregistrer la sélection", bg=ACCENT)
+            self._save_btn.master.configure(bg=ACCENT)
+        self._root.after(1800, _reset)
 
     # ── Drag ──────────────────────────────────────────────────────────────────
 
