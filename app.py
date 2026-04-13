@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.2"
+VERSION      = "1.3.3"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -108,30 +108,30 @@ ALERT_B = "#b01a28"
 # Helpers macOS natif
 # ─────────────────────────────────────────────────────────────────────────────
 
-def boost_window(tk_win, high=True):
+def boost_all_windows():
     """
-    Passe une fenêtre tkinter au niveau voulu :
-      high=True  → NSScreenSaverWindowLevel (au-dessus de TOUT — bannière d'alerte)
-      high=False → NSFloatingWindowLevel    (au-dessus d'OBS, mais les autres apps
-                                             peuvent passer devant — panneau de contrôle)
+    Passe TOUTES les fenêtres de l'app au niveau NSScreenSaverWindowLevel.
+    On ne filtre pas par ID (winfo_id ≠ windowNumber sur macOS) : on set tout.
+    Appelé au démarrage ET toutes les 5 s pour résister aux resets de macOS.
     """
     if not HAVE_APPKIT:
         return
     try:
-        level = (AppKit.NSScreenSaverWindowLevel
-                 if high else AppKit.NSFloatingWindowLevel)
-        wid = tk_win.winfo_id()
+        level    = AppKit.NSScreenSaverWindowLevel
+        behavior = (AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
+                    AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
         for ns_win in AppKit.NSApp.windows():
-            if ns_win.windowNumber() == wid:
+            try:
                 ns_win.setLevel_(level)
-                ns_win.setCollectionBehavior_(
-                    AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
-                    AppKit.NSWindowCollectionBehaviorStationary |
-                    AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
-                )
-                break
+                ns_win.setCollectionBehavior_(behavior)
+            except Exception:
+                pass
     except Exception:
         pass
+
+# Alias pour compatibilité avec les anciens appels
+def boost_window(tk_win, high=True):
+    boost_all_windows()
 
 
 def version_tuple(v):
@@ -1054,6 +1054,7 @@ class OBSMonitorApp:
         self._root.after(self.TICK_MS, self._tick)
         self._root.after(2000,         self._save_positions)
         self._root.after(5000,         self._check_update)   # vérif au démarrage
+        self._root.after(500,          self._reboost)        # always-on-top persistant
 
 
     # ── Connexion OBS ─────────────────────────────────────────────────────────
@@ -1164,6 +1165,11 @@ class OBSMonitorApp:
             self._last_src_refresh = time.time()
 
         self._root.after(self.TICK_MS, self._tick)
+
+    def _reboost(self):
+        """Re-applique NSScreenSaverWindowLevel toutes les 5 s sur toutes les fenêtres."""
+        boost_all_windows()
+        self._root.after(5000, self._reboost)
 
     def _check_update(self):
         """Vérifie les mises à jour en background, notifie si dispo."""
