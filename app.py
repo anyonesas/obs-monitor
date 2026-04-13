@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.3.5"
+VERSION      = "1.3.6"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -715,10 +715,12 @@ class ControlPanel:
         pw_entry.pack(side="left", fill="x", expand=True, ipady=4)
 
         # Bouton appliquer
-        apply_btn = tk.Label(self._cfg_panel, text="✓  Appliquer", fg=BG, bg=ACCENT,
-                             font=("SF Pro Display", 10, "bold"), cursor="hand2", pady=5)
+        apply_btn = tk.Button(self._cfg_panel, text="✓  Appliquer", fg=BG, bg=ACCENT,
+                              font=("SF Pro Display", 10, "bold"), cursor="hand2", pady=4,
+                              relief="flat", bd=0,
+                              activebackground=ACCENT, activeforeground=BG,
+                              command=self._apply_config)
         apply_btn.pack(fill="x", padx=12, pady=(6, 10))
-        apply_btn.bind("<Button-1>", lambda e: self._apply_config())
 
         self._sep()
 
@@ -744,15 +746,17 @@ class ControlPanel:
         )
         self._video_placeholder.pack(anchor="w")
 
-        # ── Bouton Enregistrer la sélection
-        self._save_btn = tk.Label(
+        # ── Bouton Enregistrer la sélection (tk.Button natif — plus fiable à NSScreenSaverWindowLevel)
+        self._save_btn = tk.Button(
             r, text="💾  Enregistrer la sélection",
             fg=BG, bg=ACCENT,
             font=("SF Pro Display", 10, "bold"),
-            cursor="hand2", pady=5
+            cursor="hand2", pady=4,
+            relief="flat", bd=0,
+            activebackground=ACCENT, activeforeground=BG,
+            command=self._save_sources
         )
         self._save_btn.pack(fill="x", padx=14, pady=(6, 2))
-        self._save_btn.bind("<Button-1>", lambda e: self._save_sources())
 
         # ── Problèmes détectés (toujours dans le DOM, juste vide si aucun)
         self._issues_sep   = tk.Frame(r, bg=BORDER, height=1)
