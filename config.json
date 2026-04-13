@@ -1,0 +1,33 @@
+{
+  "obs": {
+    "host": "localhost",
+    "port": 4455,
+    "password": "m0n83LACP3PrCLgB"
+  },
+  "checks": {
+    "audio": {
+      "enabled": true,
+      "silence_db": -50,
+      "silence_duration_s": 3,
+      "clip_db": -1,
+      "monitor_inputs": []
+    },
+    "video": {
+      "enabled": true,
+      "freeze_threshold": 0.985,
+      "freeze_duration_s": 4,
+      "dark_threshold": 12,
+      "bright_threshold": 242,
+      "check_interval_s": 2,
+      "monitor_sources": []
+    }
+  },
+  "alert": {
+    "flash_interval_ms": 380,
+    "window_position": "top-right"
+  },
+  "panel": {
+    "x": null,
+    "y": null
+  }
+}
