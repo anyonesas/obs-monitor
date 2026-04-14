@@ -2,32 +2,41 @@
   "obs": {
     "host": "localhost",
     "port": 4455,
-    "password": "m0n83LACP3PrCLgB"
+    "password": ""
   },
   "checks": {
     "audio": {
-      "enabled": true,
       "silence_db": -50,
       "silence_duration_s": 3,
       "clip_db": -1,
-      "monitor_inputs": []
+      "flat_std_db": 2.5,
+      "flat_min_db": -45,
+      "flat_duration_s": 5,
+      "clip_ratio": 0.4,
+      "monitor_inputs": null
     },
     "video": {
-      "enabled": true,
-      "freeze_threshold": 0.985,
-      "freeze_duration_s": 4,
-      "dark_threshold": 12,
+      "freeze_threshold": 0.997,
+      "freeze_duration_s": 3,
+      "dark_threshold": 30,
       "bright_threshold": 242,
       "check_interval_s": 2,
-      "monitor_sources": []
+      "monitor_sources": null
     }
-  },
-  "alert": {
-    "flash_interval_ms": 380,
-    "window_position": "top-right"
   },
   "panel": {
     "x": null,
     "y": null
+  },
+  "banner": {
+    "y": null
+  },
+  "sms": {
+    "enabled": true,
+    "api_key": "d1e24128aa9c26a1adfcf1c592fb9ecd0d6e7eb9",
+    "device": "9210|1",
+    "recipient": "+33632548891",
+    "cooldown_s": 600,
+    "min_duration_s": 10
   }
 }

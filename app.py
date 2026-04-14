@@ -125,16 +125,36 @@ DEFAULT_CONFIG = {
     }
 }
 
+def _bundled_config():
+    """Config par défaut bundlée dans le .app (credentials pré-remplis)."""
+    # En mode PyInstaller frozen, les resources sont dans sys._MEIPASS
+    if getattr(sys, 'frozen', False):
+        path = os.path.join(sys._MEIPASS, 'config.json')
+    else:
+        path = os.path.join(BASE_DIR, 'config.json')
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return DEFAULT_CONFIG
+
 def load_config():
     if not os.path.exists(CONFIG_PATH):
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG
+        # Premier install : utiliser le config bundlé (credentials pré-remplis)
+        base = _bundled_config()
+        save_config(base)
+        return base
     with open(CONFIG_PATH) as f:
         c = json.load(f)
-    # Fusionne avec les defaults pour les cles manquantes
+    # Fusionne avec les defaults pour les cles manquantes (toutes sections)
     for section, vals in DEFAULT_CONFIG["checks"].items():
         for k, v in vals.items():
             c["checks"].setdefault(section, {}).setdefault(k, v)
+    if "sms" not in c:
+        c["sms"] = dict(DEFAULT_CONFIG["sms"])
+    else:
+        for k, v in DEFAULT_CONFIG["sms"].items():
+            c["sms"].setdefault(k, v)
     return c
 
 def save_config(cfg):
