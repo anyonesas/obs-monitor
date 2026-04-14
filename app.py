@@ -4,7 +4,7 @@ OBS Monitor v1.1 — Fenêtre flottante
 Panneau de contrôle + bannière d'alerte clignotante sur tous les écrans.
 """
 
-VERSION      = "1.4.0"
+VERSION      = "1.4.1"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -30,6 +30,28 @@ try:
     HAVE_APPKIT = True
 except ImportError:
     HAVE_APPKIT = False
+
+# API CoreGraphics privée — set window level directement par CGWindowID
+# Contourne le problème NSApp.windows() vide dans les apps PyInstaller bundlées
+import ctypes as _ctypes
+try:
+    _CG  = _ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+    _CG.CGSMainConnectionID.restype = _ctypes.c_uint
+    _CG.CGSSetWindowLevel.argtypes  = [_ctypes.c_uint, _ctypes.c_uint, _ctypes.c_int]
+    _CG.CGSSetWindowLevel.restype   = _ctypes.c_int
+    _CGS_CONN = _CG.CGSMainConnectionID()
+    HAVE_CGS  = (_CGS_CONN != 0)
+except Exception:
+    HAVE_CGS = False
+
+def _cgs_set_level(wid: int, level: int) -> bool:
+    """Fixe le window level via CoreGraphics (wid = winfo_id() tkinter = CGWindowID)."""
+    if not HAVE_CGS or not wid:
+        return False
+    try:
+        return _CG.CGSSetWindowLevel(_CGS_CONN, wid, level) == 0
+    except Exception:
+        return False
 
 try:
     import obsws_python as obs_ws
@@ -111,40 +133,59 @@ ALERT_B = "#b01a28"
 # Helpers macOS natif
 # ─────────────────────────────────────────────────────────────────────────────
 
-def boost_all_windows(order_front=False, banner_wins=None):
+LEVEL_PANEL  = 1000   # NSScreenSaverWindowLevel
+LEVEL_BANNER = 1100   # Au-dessus d'OBS Projector always-on-top (1000)
+
+def boost_tk_windows(tk_wins_panel, tk_wins_banner, order_front=False):
     """
-    Niveaux de fenêtre :
-      - Panneau de contrôle → NSScreenSaverWindowLevel (1000)
-      - Bannières d'alerte  → NSScreenSaverWindowLevel + 1 (1001)
-        OBS Projector "always on top" est à 1000, on passe au-dessus.
-    banner_wins : set des winfo_id() des fenêtres bannières (niveau 1001).
-    order_front : appelle orderFront_ après avoir fixé le niveau.
+    Fixe les window levels directement via CGS (CoreGraphics) sur les winfo_id()
+    tkinter. Bypasse NSApp.windows() qui est vide dans une app PyInstaller bundlée.
+    Fallback PyObjC si CGS indispo.
     """
+    # ── Méthode 1 : ctypes CoreGraphics — fiable dans apps bundlées
+    if HAVE_CGS:
+        for win in tk_wins_panel:
+            try:
+                _cgs_set_level(win.winfo_id(), LEVEL_PANEL)
+                win.attributes("-topmost", True)
+            except Exception:
+                pass
+        for win in tk_wins_banner:
+            try:
+                _cgs_set_level(win.winfo_id(), LEVEL_BANNER)
+                win.attributes("-topmost", True)
+                if order_front:
+                    win.lift()
+            except Exception:
+                pass
+        return
+
+    # ── Méthode 2 : PyObjC fallback
     if not HAVE_APPKIT:
         return
     try:
-        level_panel  = AppKit.NSScreenSaverWindowLevel
-        level_banner = AppKit.NSScreenSaverWindowLevel + 100  # bien au-dessus d'OBS
         behavior = (AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
                     AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
-        ids = set(banner_wins) if banner_wins else set()
+        banner_ids = {w.winfo_id() for w in tk_wins_banner}
         for ns_win in AppKit.NSApp.windows():
             try:
                 wid = ns_win.windowNumber()
-                lvl = level_banner if (ids and wid in ids) else level_panel
+                lvl = LEVEL_BANNER if wid in banner_ids else LEVEL_PANEL
                 ns_win.setLevel_(lvl)
                 ns_win.setCollectionBehavior_(behavior)
                 if order_front:
-                    # orderFrontRegardless fonctionne même quand notre app
-                    # n'est pas l'app active — indispensable contre OBS Projector
                     ns_win.orderFrontRegardless()
             except Exception:
                 pass
     except Exception:
         pass
 
+def boost_all_windows(order_front=False, banner_wins=None):
+    """Compatibilité anciens appels — no-op, remplacé par boost_tk_windows."""
+    pass
+
 def boost_window(tk_win, high=True):
-    boost_all_windows()
+    boost_tk_windows([tk_win], [], order_front=False)
 
 
 def version_tuple(v):
@@ -620,27 +661,8 @@ class AlertBanner:
         # Boost niveau macOS après un court délai (fenêtres doivent être affichées)
         root.after(300, self._boost_all)
 
-    def _banner_ns_ids(self):
-        """Retourne les windowNumber() Cocoa des fenêtres bannières."""
-        ids = set()
-        if not HAVE_APPKIT:
-            return ids
-        tk_ids = {win.winfo_id() for win in self._wins}
-        for ns_win in AppKit.NSApp.windows():
-            try:
-                if ns_win.windowNumber() in tk_ids:
-                    ids.add(ns_win.windowNumber())
-            except Exception:
-                pass
-        # Fallback : si le matching par ID échoue, toutes les fenêtres sauf la première
-        # (le panneau principal) → on les met toutes à niveau élevé, c'est safe.
-        if not ids:
-            wins = list(AppKit.NSApp.windows())
-            ids = {w.windowNumber() for w in wins}
-        return ids
-
-    def _boost_all(self):
-        boost_all_windows(banner_wins=self._banner_ns_ids())
+    def _boost_all(self, order_front=False):
+        boost_tk_windows([], self._wins, order_front=order_front)
 
     def _drag_start(self, e):
         self._drag_anchor = e.y_root - self._wins[0].winfo_y()
@@ -671,8 +693,8 @@ class AlertBanner:
             win.configure(bg=bg)
             self._recolor(win, bg)
             win.attributes("-alpha", 0.93)
-        # Force les bannières au premier plan à chaque flash (niveau 1001 > OBS 1000)
-        boost_all_windows(order_front=True, banner_wins=self._banner_ns_ids())
+        # Force les bannières au premier plan à chaque flash
+        self._boost_all(order_front=True)
 
     def _recolor(self, w, bg):
         try:
@@ -727,9 +749,8 @@ class ControlPanel:
 
         self._build()
         self._autosize()
-        root.deiconify()                  # réaffiche sans barre native
-        # Panneau : NSScreenSaverWindowLevel — toujours au-dessus de tout, OBS inclus
-        root.after(300, lambda: boost_window(root, high=True))
+        root.deiconify()
+        root.after(300, lambda: boost_tk_windows([root], [], order_front=False))
         self._enable_drag()
 
     # ── Construction ──────────────────────────────────────────────────────────
@@ -1273,8 +1294,8 @@ class OBSMonitorApp:
         self._root.after(self.TICK_MS, self._tick)
 
     def _reboost(self):
-        """Re-applique NSScreenSaverWindowLevel toutes les 5 s sur toutes les fenêtres."""
-        boost_all_windows()
+        """Re-applique les window levels toutes les 5 s (panel + bannières)."""
+        boost_tk_windows([self._root], self._banner._wins, order_front=False)
         self._root.after(5000, self._reboost)
 
     def _check_update(self):
