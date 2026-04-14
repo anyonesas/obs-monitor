@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.2.2"
+VERSION      = "2.2.3"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -100,6 +100,7 @@ DEFAULT_CONFIG = {
             "clip_db": -1,
             "flat_std_db": 2.5,
             "flat_min_db": -45,
+            "flat_duration_s": 5,
             "clip_ratio": 0.4,
             "monitor_inputs": None
         },
@@ -481,6 +482,7 @@ class AudioMonitor:
         self.cfg   = cfg
         self._lock = threading.Lock()
         self._inputs = {}
+        self._flat_since = {}  # {name: timestamp depuis lequel le son est plat}
         # {name: {peak_db, last_sound_t, buf: deque[float]}}
 
     def on_volume_meters(self, data):
@@ -531,6 +533,7 @@ class AudioMonitor:
         clip_db        = self.cfg.get("clip_db", -1)
         flat_std       = self.cfg.get("flat_std_db", 2.5)
         flat_min       = self.cfg.get("flat_min_db", -45)
+        flat_dur       = self.cfg.get("flat_duration_s", 5)
         clip_ratio_thr = self.cfg.get("clip_ratio", 0.4)
 
         with self._lock:
@@ -558,11 +561,17 @@ class AudioMonitor:
                 std  = (sum((v - mean) ** 2 for v in buf) / len(buf)) ** 0.5
 
                 # Son trop constant (bourdonnement, micro bloqué)
+                # Doit rester plat pendant flat_dur secondes d'affilée pour déclencher
                 if mean > flat_min and std < flat_std:
-                    out.append(
-                        f"\U0001f41d  \u00ab {name} \u00bb  son trop constant (variation {std:.1f} dB sur 7s)"
-                        f"  \u2014 bourdonnement / micro bloqué ?"
-                    )
+                    self._flat_since.setdefault(name, now)
+                    flat_for = now - self._flat_since[name]
+                    if flat_for >= flat_dur:
+                        out.append(
+                            f"\U0001f41d  \u00ab {name} \u00bb  son trop constant depuis {flat_for:.0f}s (variation {std:.1f} dB)"
+                            f"  \u2014 bourdonnement / micro bloqué ?"
+                        )
+                else:
+                    self._flat_since.pop(name, None)
 
                 # Saturation chronique (trop longtemps dans le rouge)
                 clip_count = sum(1 for v in buf if v >= clip_db)
