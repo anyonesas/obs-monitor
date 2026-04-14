@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.4.0"
+VERSION      = "2.4.1"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -18,6 +18,7 @@ import io
 import sys
 import urllib.request
 import urllib.error
+import datetime
 import subprocess
 import tempfile
 import shutil
@@ -1416,18 +1417,30 @@ class NativePanel:
 # Native Alert Banner — red flashing bar across top of screen
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _SnoozeTarget(Foundation.NSObject):
+    """Cible ObjC pour les boutons snooze de la bannière."""
+    _callback = None
+
+    def clicked_(self, sender):
+        if self._callback:
+            self._callback()
+
+
 class NativeBanner:
     """
     Plein écran, semi-transparent, rouge clignotant.
     Affiche "APPELER MEMBRE DE L'ÉQUIPE" en grand + le détail des alertes.
+    4 boutons snooze pour ignorer temporairement.
     """
 
     def __init__(self):
-        self._panel   = None
-        self._lbl_cta = None   # "APPELER MEMBRE DE L'ÉQUIPE"
-        self._lbl_det = None   # détail des alertes
-        self._built   = False
-        self._visible = False
+        self._panel       = None
+        self._lbl_cta     = None   # "APPELER MEMBRE DE L'ÉQUIPE"
+        self._lbl_det     = None   # détail des alertes
+        self._built       = False
+        self._visible     = False
+        self._snooze_until = 0.0   # timestamp jusqu'auquel la bannière est muette
+        self._snooze_targets = []  # garder les targets en vie (évite GC)
 
     def build(self):
         if self._built:
@@ -1486,7 +1499,7 @@ class NativeBanner:
         content.addSubview_(self._lbl_cta)
 
         # ── Label secondaire : détail des alertes ──
-        det_rect = Foundation.NSMakeRect(20, sh * 0.30, sw - 40, sh * 0.10)
+        det_rect = Foundation.NSMakeRect(20, sh * 0.32, sw - 40, sh * 0.10)
         self._lbl_det = AppKit.NSTextField.alloc().initWithFrame_(det_rect)
         self._lbl_det.setStringValue_("")
         self._lbl_det.setTextColor_(AppKit.NSColor.whiteColor())
@@ -1500,12 +1513,71 @@ class NativeBanner:
         self._lbl_det.cell().setWraps_(True)
         content.addSubview_(self._lbl_det)
 
+        # ── Boutons snooze ──
+        snooze_options = [
+            ("Ok pour 10 minutes",       600),
+            ("Ok pour 30 minutes",       1800),
+            ("Ok pour 1h",               3600),
+            ("Ok jusqu'à demain matin",  None),   # None = 8h demain
+        ]
+        n_btns   = len(snooze_options)
+        btn_w    = 220
+        btn_h    = 44
+        spacing  = 20
+        total_w  = n_btns * btn_w + (n_btns - 1) * spacing
+        start_x  = (sw - total_w) / 2
+        btn_y    = sh * 0.16
+
+        for i, (label, duration) in enumerate(snooze_options):
+            bx = start_x + i * (btn_w + spacing)
+            btn_rect = Foundation.NSMakeRect(bx, btn_y, btn_w, btn_h)
+            btn = AppKit.NSButton.alloc().initWithFrame_(btn_rect)
+            btn.setTitle_(label)
+            btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            btn.setFont_(AppKit.NSFont.boldSystemFontOfSize_(14))
+            # Fond blanc, texte rouge foncé
+            btn.setWantsLayer_(True)
+            btn.layer().setCornerRadius_(10.0)
+            btn.layer().setBackgroundColor_(
+                AppKit.NSColor.whiteColor().CGColor()
+            )
+            btn.setContentTintColor_(_hex_to_nscolor(ALERT_A))
+
+            # Cible ObjC pour l'action
+            target = _SnoozeTarget.alloc().init()
+            _dur = duration  # capture pour le closure
+            target._callback = lambda d=_dur: self.snooze(d)
+            self._snooze_targets.append(target)  # garder en vie
+
+            btn.setTarget_(target)
+            btn.setAction_("clicked:")
+            content.addSubview_(btn)
+
         # Start hidden
         self._panel.orderOut_(None)
+
+    def snooze(self, duration):
+        """Cache la bannière pour `duration` secondes (None = jusqu'à 8h demain)."""
+        if duration is None:
+            tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+            target_dt = datetime.datetime.combine(tomorrow, datetime.time(8, 0))
+            duration = (target_dt - datetime.datetime.now()).total_seconds()
+        self._snooze_until = time.time() + max(0, duration)
+        if self._panel and self._visible:
+            self._panel.orderOut_(None)
+            self._visible = False
+        print(f"[banner] snooze {duration/60:.0f} min")
 
     def update(self, issues, flash_state):
         """Update banner visibility and content based on issues."""
         if not self._panel:
+            return
+
+        # Snooze actif : bannière muette
+        if time.time() < self._snooze_until:
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
             return
 
         if not issues:
