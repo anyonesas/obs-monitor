@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.2.1"
+VERSION      = "2.2.2"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -101,7 +101,7 @@ DEFAULT_CONFIG = {
             "flat_std_db": 2.5,
             "flat_min_db": -45,
             "clip_ratio": 0.4,
-            "monitor_inputs": []
+            "monitor_inputs": None
         },
         "video": {
             "freeze_threshold": 0.997,
@@ -109,7 +109,7 @@ DEFAULT_CONFIG = {
             "dark_threshold": 30,
             "bright_threshold": 242,
             "check_interval_s": 2,
-            "monitor_sources": []
+            "monitor_sources": None
         }
     },
     "panel": {"x": None, "y": None},
@@ -523,7 +523,7 @@ class AudioMonitor:
 
     def issues(self):
         now     = time.time()
-        monitor = self.cfg.get("monitor_inputs", [])
+        monitor = self.cfg.get("monitor_inputs", None)
         out     = []
 
         silence_thresh = self.cfg["silence_db"]
@@ -535,7 +535,8 @@ class AudioMonitor:
 
         with self._lock:
             for name, e in self._inputs.items():
-                if monitor and name not in monitor:
+                # monitor=None → tout surveiller, monitor=[] → rien
+                if monitor is not None and name not in monitor:
                     continue
 
                 db      = e["peak_db"]
@@ -616,7 +617,7 @@ class VideoMonitor:
         except Exception:
             return
 
-        monitor    = self.cfg.get("monitor_sources", [])
+        monitor    = self.cfg.get("monitor_sources", None)
         found      = []
         new_issues = []
 
@@ -627,7 +628,10 @@ class VideoMonitor:
             if not src:
                 continue
             found.append(src)
-            if monitor and src not in monitor:
+            # monitor=None → pas encore configuré → tout surveiller
+            # monitor=[]   → tout décoché → rien surveiller
+            # monitor=[..] → surveiller uniquement les sources cochées
+            if monitor is not None and src not in monitor:
                 continue
 
             img = self._capture(client, src)
@@ -660,7 +664,7 @@ class VideoMonitor:
                     f"  \u2014 éclairage trop fort ?"
                 )
 
-            fi = self._freeze(src, img)
+            fi = self._freeze(src, img, br)
             if fi:
                 new_issues.append(fi)
 
@@ -682,7 +686,7 @@ class VideoMonitor:
                 continue
         return None
 
-    def _freeze(self, src, img):
+    def _freeze(self, src, img, brightness=128):
         now = time.time()
         with self._lock:
             prev = self._prev_frames.get(src)
@@ -697,9 +701,18 @@ class VideoMonitor:
             max_diff = diff.getextrema()[1]
             sim  = 1.0 - rms / 128.0
 
-            # Vrai freeze = similarite tres haute ET aucun pixel n'a vraiment bouge
-            # Scene calme naturelle = sim elevee mais quelques pixels varient (bruit, respiration)
-            is_frozen = (sim >= self.cfg["freeze_threshold"]) and (max_diff < 8)
+            # Pour les images sombres, le bruit capteur cause des variations
+            # de pixels même sur une scène statique → seuil max_diff plus souple
+            if brightness < self.cfg.get("dark_threshold", 30):
+                max_diff_limit = 30   # images sombres : bruit capteur important
+                sim_threshold  = 0.990
+            else:
+                max_diff_limit = 15   # images normales
+                sim_threshold  = self.cfg["freeze_threshold"]
+
+            # Vrai freeze = similarité très haute ET aucun pixel n'a vraiment bougé
+            # Scène calme naturelle = sim élevée mais quelques pixels varient (bruit, respiration)
+            is_frozen = (sim >= sim_threshold) and (max_diff < max_diff_limit)
 
             if is_frozen:
                 with self._lock:
@@ -933,15 +946,17 @@ class NativePanel:
         )
         y += 20
 
-        monitored_audio = set()
-        monitored_video = set()
+        monitored_audio = None  # None = tout coché, set() = rien coché
+        monitored_video = None
         if cfg:
-            monitored_audio = set(cfg["checks"]["audio"].get("monitor_inputs", []))
-            monitored_video = set(cfg["checks"]["video"].get("monitor_sources", []))
+            raw_a = cfg["checks"]["audio"].get("monitor_inputs", None)
+            raw_v = cfg["checks"]["video"].get("monitor_sources", None)
+            monitored_audio = set(raw_a) if raw_a is not None else None
+            monitored_video = set(raw_v) if raw_v is not None else None
 
         if audio_names:
             for name in audio_names:
-                checked = (not monitored_audio) or (name in monitored_audio)
+                checked = (monitored_audio is None) or (name in monitored_audio)
                 cb = self._make_checkbox(name, checked, y, cw)
                 doc.addSubview_(cb)
                 self._audio_cbs.append((name, cb))
@@ -961,7 +976,7 @@ class NativePanel:
 
         if video_names:
             for name in video_names:
-                checked = (not monitored_video) or (name in monitored_video)
+                checked = (monitored_video is None) or (name in monitored_video)
                 cb = self._make_checkbox(name, checked, y, cw)
                 doc.addSubview_(cb)
                 self._video_cbs.append((name, cb))
@@ -1156,10 +1171,10 @@ class NativePanel:
         try:
             acfg = cfg["checks"]["audio"]
             vcfg = cfg["checks"]["video"]
-            mon_a = acfg.get("monitor_inputs", [])
-            mon_v = vcfg.get("monitor_sources", [])
-            a_str = ", ".join(mon_a) if mon_a else "(toutes)"
-            v_str = ", ".join(mon_v) if mon_v else "(toutes)"
+            mon_a = acfg.get("monitor_inputs", None)
+            mon_v = vcfg.get("monitor_sources", None)
+            a_str = "(toutes)" if mon_a is None else (", ".join(mon_a) if mon_a else "(aucune)")
+            v_str = "(toutes)" if mon_v is None else (", ".join(mon_v) if mon_v else "(aucune)")
 
             lines = [
                 f"Audio : {a_str}",
@@ -1693,9 +1708,9 @@ class OBSMonitorRumps(rumps.App):
         """Auto-sync checkbox state to config (no notification)."""
         try:
             audio_sel, video_sel = self._panel.get_selected_sources()
-            old_a = self._cfg["checks"]["audio"].get("monitor_inputs", [])
-            old_v = self._cfg["checks"]["video"].get("monitor_sources", [])
-            if sorted(audio_sel) != sorted(old_a) or sorted(video_sel) != sorted(old_v):
+            old_a = self._cfg["checks"]["audio"].get("monitor_inputs", None)
+            old_v = self._cfg["checks"]["video"].get("monitor_sources", None)
+            if old_a is None or old_v is None or sorted(audio_sel) != sorted(old_a) or sorted(video_sel) != sorted(old_v):
                 self._cfg["checks"]["audio"]["monitor_inputs"] = audio_sel
                 self._cfg["checks"]["video"]["monitor_sources"] = video_sel
                 save_config(self._cfg)
