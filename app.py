@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.3.0"
+VERSION      = "2.3.4"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -403,9 +403,10 @@ def install_update(dmg_url, app_path, on_progress=None):
 # Attend que l'app courante se ferme
 while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
 sleep 0.5
-# Remplace le .app
+# Remplace le .app (ditto preserve la signature de code)
 rm -rf "{dst_app}"
-cp -R "{src_app}" "{dst_app}"
+ditto "{src_app}" "{dst_app}"
+xattr -cr "{dst_app}"
 # Nettoie
 hdiutil detach "{mnt}" -quiet 2>/dev/null || true
 rm -f "{tmp_dmg}"
