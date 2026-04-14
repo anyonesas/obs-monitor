@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.4.5"
+VERSION      = "2.4.6"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -1722,8 +1722,9 @@ class OBSMonitorRumps(rumps.App):
             "SMS : activé" if sms_on else "SMS : désactivé",
             callback=self._on_toggle_sms,
         )
-        self._sms_config_item = rumps.MenuItem("Configuration SMS…", callback=self._on_sms_config)
-        self._sms_test_item   = rumps.MenuItem("Envoyer SMS de test", callback=self._on_sms_test)
+        self._sms_config_item  = rumps.MenuItem("Configuration SMS…", callback=self._on_sms_config)
+        self._sms_hours_item   = rumps.MenuItem(self._sms_hours_label(), callback=self._on_sms_hours)
+        self._sms_test_item    = rumps.MenuItem("Envoyer SMS de test", callback=self._on_sms_test)
 
         self._update_item = rumps.MenuItem("Vérifier mise à jour…", callback=self._on_check_update_menu)
         self._quit_item = rumps.MenuItem("Quitter", callback=self._on_quit)
@@ -1738,6 +1739,7 @@ class OBSMonitorRumps(rumps.App):
             self._config_item,
             self._sms_toggle_item,
             self._sms_config_item,
+            self._sms_hours_item,
             self._sms_test_item,
             self._update_item,
             None,
@@ -1834,6 +1836,48 @@ class OBSMonitorRumps(rumps.App):
                     )
         except Exception as e:
             print(f"[sms_config] {e}")
+
+    def _sms_hours_label(self):
+        s = self._cfg.get("sms", {})
+        frm = s.get("send_from", "00:00")
+        til = s.get("send_until", "23:59")
+        return f"Horaires SMS : {frm} — {til}"
+
+    def _on_sms_hours(self, _):
+        """Régle la plage horaire d'envoi des SMS."""
+        try:
+            s = self._cfg.setdefault("sms", dict(DEFAULT_CONFIG["sms"]))
+            frm = s.get("send_from", "10:00")
+            til = s.get("send_until", "18:30")
+            w = rumps.Window(
+                title="Horaires d'envoi des SMS",
+                message="Format : HH:MM-HH:MM  (ex : 10:00-18:30)\nLaisser vide pour envoyer à toute heure.",
+                default_text=f"{frm}-{til}",
+                ok="Enregistrer",
+                cancel="Annuler",
+                dimensions=(280, 60),
+            )
+            resp = w.run()
+            if resp.clicked:
+                text = resp.text.strip()
+                if not text:
+                    s["send_from"] = "00:00"
+                    s["send_until"] = "23:59"
+                else:
+                    parts = text.split("-")
+                    if len(parts) == 2:
+                        s["send_from"]  = parts[0].strip()
+                        s["send_until"] = parts[1].strip()
+                save_config(self._cfg)
+                self._sms_hours_item.title = self._sms_hours_label()
+                rumps.notification(
+                    title="OBS Monitor",
+                    subtitle="",
+                    message=f"Horaires SMS : {s['send_from']} — {s['send_until']}",
+                    sound=False,
+                )
+        except Exception as e:
+            print(f"[sms_hours] {e}")
 
     def _on_sms_test(self, _):
         """Send a test SMS immediately, ignoring cooldown."""
