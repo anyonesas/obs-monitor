@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.2.3"
+VERSION      = "2.3.0"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -114,7 +114,15 @@ DEFAULT_CONFIG = {
         }
     },
     "panel": {"x": None, "y": None},
-    "banner": {"y": None}
+    "banner": {"y": None},
+    "sms": {
+        "enabled": False,
+        "api_key": "",
+        "device": "",            # ex: "9210|0"
+        "recipient": "",         # ex: "+33632548891"
+        "cooldown_s": 600,       # 10 min entre SMS pour la même erreur
+        "min_duration_s": 10,    # erreur doit durer 10s avant SMS
+    }
 }
 
 def load_config():
@@ -748,6 +756,107 @@ class VideoMonitor:
     def issues(self):
         with self._lock:
             return list(self._issues_buf)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SMSNotifier — envoie des SMS via sms8.io quand des erreurs persistent
+# ─────────────────────────────────────────────────────────────────────────────
+
+import re as _re
+import urllib.parse as _urlparse
+
+class SMSNotifier:
+    """Envoie des SMS via l'API sms8.io pour chaque erreur persistante.
+
+    Logique anti-spam :
+      - Une erreur doit durer >= min_duration_s avant déclenchement
+      - Cooldown de cooldown_s entre 2 SMS pour la MÊME erreur (clé = type+source)
+      - Quand l'erreur disparaît, son état est nettoyé pour repartir à zéro
+    """
+
+    API_URL = "https://app.sms8.io/services/send.php"
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._first_seen = {}   # {key: timestamp}
+        self._last_sent  = {}   # {key: timestamp}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _issue_key(text):
+        """Clé stable pour identifier le type d'erreur (emoji + nom de source)."""
+        m = _re.search(r"\u00ab\s*([^\u00bb]+?)\s*\u00bb", text)
+        src = m.group(1) if m else ""
+        emoji = text.split(" ", 1)[0] if text else ""
+        return f"{emoji}|{src}"
+
+    def process(self, current_issues):
+        """Appelé à chaque tick avec la liste des issues actuelles."""
+        if not self.cfg.get("enabled", False):
+            return
+        if not self.cfg.get("api_key") or not self.cfg.get("recipient"):
+            return
+
+        now = time.time()
+        cooldown = self.cfg.get("cooldown_s", 600)
+        min_dur  = self.cfg.get("min_duration_s", 10)
+
+        current_keys = set()
+        with self._lock:
+            for text in current_issues:
+                key = self._issue_key(text)
+                current_keys.add(key)
+                self._first_seen.setdefault(key, now)
+                first_t = self._first_seen[key]
+                last_t  = self._last_sent.get(key, 0)
+                if (now - first_t) >= min_dur and (now - last_t) >= cooldown:
+                    self._last_sent[key] = now
+                    self._send_async(text)
+
+            # Nettoyer les erreurs qui ne sont plus actives
+            for key in list(self._first_seen.keys()):
+                if key not in current_keys:
+                    self._first_seen.pop(key, None)
+
+    def notify_event(self, key, message):
+        """Envoie un SMS one-shot pour un évènement (ex: déconnexion OBS).
+
+        Pas de durée minimale, mais cooldown respecté.
+        """
+        if not self.cfg.get("enabled", False):
+            return
+        if not self.cfg.get("api_key") or not self.cfg.get("recipient"):
+            return
+        now = time.time()
+        cooldown = self.cfg.get("cooldown_s", 600)
+        with self._lock:
+            last_t = self._last_sent.get(key, 0)
+            if (now - last_t) < cooldown:
+                return
+            self._last_sent[key] = now
+        self._send_async(message)
+
+    def _send_async(self, message):
+        threading.Thread(target=self._send, args=(message,), daemon=True).start()
+
+    def _send(self, message):
+        try:
+            device = self.cfg.get("device", "")
+            params = {
+                "key":     self.cfg["api_key"],
+                "number":  self.cfg["recipient"],
+                "message": message,
+                "devices": json.dumps([device]) if device else "[]",
+                "type":    "sms",
+                "prioritize": "0",
+            }
+            url = self.API_URL + "?" + _urlparse.urlencode(params)
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = r.read().decode("utf-8", errors="replace")[:200]
+                print(f"[sms] {r.status} → {message[:60]}  | {body[:80]}")
+        except Exception as e:
+            print(f"[sms] erreur envoi: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1457,6 +1566,13 @@ class OBSMonitorRumps(rumps.App):
         self._audio = AudioMonitor(self._cfg["checks"]["audio"])
         self._video = VideoMonitor(self._cfg["checks"]["video"], self._get_req)
 
+        # SMS notifier — partage le dict de config (modifs propagées en direct)
+        if "sms" not in self._cfg:
+            self._cfg["sms"] = dict(DEFAULT_CONFIG["sms"])
+            save_config(self._cfg)
+        self._sms = SMSNotifier(self._cfg["sms"])
+        self._was_connected = False  # pour détecter perte de connexion
+
         self._panel  = NativePanel()
         self._banner = NativeBanner()
         self._update_ver = None
@@ -1475,6 +1591,15 @@ class OBSMonitorRumps(rumps.App):
         # OBS connection config
         self._config_item = rumps.MenuItem("Configuration OBS…", callback=self._on_config)
 
+        # SMS items
+        sms_on = self._cfg.get("sms", {}).get("enabled", False)
+        self._sms_toggle_item = rumps.MenuItem(
+            "SMS : activé" if sms_on else "SMS : désactivé",
+            callback=self._on_toggle_sms,
+        )
+        self._sms_config_item = rumps.MenuItem("Configuration SMS…", callback=self._on_sms_config)
+        self._sms_test_item   = rumps.MenuItem("Envoyer SMS de test", callback=self._on_sms_test)
+
         self._update_item = rumps.MenuItem("Vérifier mise à jour…", callback=self._on_check_update_menu)
         self._quit_item = rumps.MenuItem("Quitter", callback=self._on_quit)
 
@@ -1486,6 +1611,9 @@ class OBSMonitorRumps(rumps.App):
             self._transparent_item,
             None,
             self._config_item,
+            self._sms_toggle_item,
+            self._sms_config_item,
+            self._sms_test_item,
             self._update_item,
             None,
             self._quit_item,
@@ -1538,6 +1666,71 @@ class OBSMonitorRumps(rumps.App):
                     self._disconnect()
         except Exception as e:
             print(f"[config] {e}")
+
+    def _on_toggle_sms(self, _):
+        """Toggle SMS notifications on/off."""
+        cur = self._cfg.setdefault("sms", dict(DEFAULT_CONFIG["sms"]))
+        cur["enabled"] = not cur.get("enabled", False)
+        save_config(self._cfg)
+        self._sms_toggle_item.title = "SMS : activé" if cur["enabled"] else "SMS : désactivé"
+        rumps.notification(
+            title="OBS Monitor",
+            subtitle="",
+            message="SMS activés" if cur["enabled"] else "SMS désactivés",
+            sound=False,
+        )
+
+    def _on_sms_config(self, _):
+        """Show SMS config dialog (api_key, device, recipient)."""
+        try:
+            s = self._cfg.setdefault("sms", dict(DEFAULT_CONFIG["sms"]))
+            current = f"{s.get('api_key','')}|{s.get('device','')}|{s.get('recipient','')}"
+            w = rumps.Window(
+                title="Configuration SMS (sms8.io)",
+                message="Format : APIKEY|DEVICE|+33XXXXXXXXX\n(device = ID|simSlot, ex : 9210|0)",
+                default_text=current,
+                ok="Enregistrer",
+                cancel="Annuler",
+                dimensions=(420, 60),
+            )
+            resp = w.run()
+            if resp.clicked:
+                parts = resp.text.strip().split("|")
+                if len(parts) >= 3:
+                    s["api_key"]   = parts[0].strip()
+                    s["device"]    = parts[1].strip()
+                    s["recipient"] = "|".join(parts[2:]).strip()
+                    save_config(self._cfg)
+                    rumps.notification(
+                        title="OBS Monitor",
+                        subtitle="",
+                        message="Configuration SMS enregistrée ✓",
+                        sound=False,
+                    )
+        except Exception as e:
+            print(f"[sms_config] {e}")
+
+    def _on_sms_test(self, _):
+        """Send a test SMS immediately, ignoring cooldown."""
+        s = self._cfg.get("sms", {})
+        if not s.get("api_key") or not s.get("recipient"):
+            rumps.notification(
+                title="OBS Monitor",
+                subtitle="SMS non configurés",
+                message="Renseigne d'abord la config SMS",
+                sound=False,
+            )
+            return
+        # Bypass cooldown by clearing last_sent for the test key
+        with self._sms._lock:
+            self._sms._last_sent.pop("__test__", None)
+        self._sms.notify_event("__test__", f"OBS Monitor v{VERSION} — SMS de test ✓")
+        rumps.notification(
+            title="OBS Monitor",
+            subtitle="",
+            message="SMS de test envoyé",
+            sound=False,
+        )
 
     def _on_check_update_menu(self, _):
         threading.Thread(target=self._check_update_bg, daemon=True).start()
@@ -1777,6 +1970,20 @@ class OBSMonitorRumps(rumps.App):
 
         # macOS notifications
         self._maybe_notify(issues)
+
+        # SMS via sms8.io
+        try:
+            # Détecter une perte de connexion OBS → SMS one-shot
+            if self._was_connected and not self._connected:
+                self._sms.notify_event(
+                    "obs_disconnect",
+                    f"OBS Monitor — Connexion à OBS perdue ({time.strftime('%H:%M:%S')})"
+                )
+            self._was_connected = self._connected
+            # Envoyer SMS pour chaque issue persistante
+            self._sms.process(issues)
+        except Exception as e:
+            print(f"[sms.tick] {e}")
 
         # Save positions periodically
         if int(time.time()) % 5 == 0:
