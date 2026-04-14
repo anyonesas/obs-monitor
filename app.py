@@ -18,7 +18,6 @@ import io
 import sys
 import urllib.request
 import urllib.error
-import ssl as _ssl
 import subprocess
 import tempfile
 import shutil
@@ -874,6 +873,7 @@ class SMSNotifier:
             url = self.API_URL + "?" + _urlparse.urlencode(params)
             req = urllib.request.Request(url, method="GET")
             # SSL context sans vérif : Python bundlé PyInstaller n'a pas les CA macOS
+            import ssl as _ssl
             ctx = _ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = _ssl.CERT_NONE
