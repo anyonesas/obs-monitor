@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.3.5"
+VERSION      = "2.4.0"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -1418,16 +1418,15 @@ class NativePanel:
 
 class NativeBanner:
     """
-    Full-width red flashing banner NSPanel at the top of the screen.
-    Uses NSWindowStyleMaskNonactivatingPanel to appear above OBS Projector.
-    Width = screen width minus NativePanel width (so they don't overlap).
+    Plein écran, semi-transparent, rouge clignotant.
+    Affiche "APPELER MEMBRE DE L'ÉQUIPE" en grand + le détail des alertes.
     """
-    BANNER_H = 38
 
     def __init__(self):
-        self._panel = None
-        self._label = None
-        self._built = False
+        self._panel   = None
+        self._lbl_cta = None   # "APPELER MEMBRE DE L'ÉQUIPE"
+        self._lbl_det = None   # détail des alertes
+        self._built   = False
         self._visible = False
 
     def build(self):
@@ -1442,17 +1441,13 @@ class NativeBanner:
         sw = main.size.width
         sh = main.size.height
 
-        # Banner spans screen width minus panel area (panel on the right)
-        banner_w = sw - NativePanel.W - 30
-        ns_x = 0
-        ns_y = sh - self.BANNER_H - 4  # top of screen (macOS coords)
-
         style = (
             AppKit.NSWindowStyleMaskBorderless |
             AppKit.NSWindowStyleMaskNonactivatingPanel
         )
 
-        rect = Foundation.NSMakeRect(ns_x, ns_y, banner_w, self.BANNER_H)
+        # Plein écran
+        rect = Foundation.NSMakeRect(0, 0, sw, sh)
         self._panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, AppKit.NSBackingStoreBuffered, False,
         )
@@ -1470,32 +1465,40 @@ class NativeBanner:
 
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(_hex_to_nscolor(ALERT_A))
-        self._panel.setAlphaValue_(0.95)
+        self._panel.setAlphaValue_(0.82)   # semi-transparent : on voit encore l'écran
         self._panel.setSharingType_(1)
-        self._panel.setMovableByWindowBackground_(True)
 
-        # Rounded corners
-        self._panel.contentView().setWantsLayer_(True)
-        self._panel.contentView().layer().setCornerRadius_(8.0)
-
-        # Label
         content = self._panel.contentView()
-        cf = content.frame()
-        lbl_rect = Foundation.NSMakeRect(16, 4, cf.size.width - 32, cf.size.height - 8)
-        self._label = AppKit.NSTextField.alloc().initWithFrame_(lbl_rect)
-        self._label.setStringValue_("")
-        self._label.setTextColor_(AppKit.NSColor.whiteColor())
-        self._label.setBackgroundColor_(AppKit.NSColor.clearColor())
-        self._label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(14))
-        self._label.setBezeled_(False)
-        self._label.setEditable_(False)
-        self._label.setSelectable_(False)
-        self._label.setDrawsBackground_(False)
-        self._label.setAlignment_(AppKit.NSTextAlignmentCenter)
-        self._label.setAutoresizingMask_(
-            AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
-        )
-        content.addSubview_(self._label)
+
+        # ── Label principal : APPELER MEMBRE DE L'ÉQUIPE ──
+        cta_rect = Foundation.NSMakeRect(20, sh * 0.42, sw - 40, sh * 0.20)
+        self._lbl_cta = AppKit.NSTextField.alloc().initWithFrame_(cta_rect)
+        self._lbl_cta.setStringValue_("APPELER MEMBRE DE L'ÉQUIPE")
+        self._lbl_cta.setTextColor_(AppKit.NSColor.whiteColor())
+        self._lbl_cta.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self._lbl_cta.setFont_(AppKit.NSFont.boldSystemFontOfSize_(64))
+        self._lbl_cta.setBezeled_(False)
+        self._lbl_cta.setEditable_(False)
+        self._lbl_cta.setSelectable_(False)
+        self._lbl_cta.setDrawsBackground_(False)
+        self._lbl_cta.setAlignment_(AppKit.NSTextAlignmentCenter)
+        self._lbl_cta.cell().setWraps_(True)
+        content.addSubview_(self._lbl_cta)
+
+        # ── Label secondaire : détail des alertes ──
+        det_rect = Foundation.NSMakeRect(20, sh * 0.30, sw - 40, sh * 0.10)
+        self._lbl_det = AppKit.NSTextField.alloc().initWithFrame_(det_rect)
+        self._lbl_det.setStringValue_("")
+        self._lbl_det.setTextColor_(AppKit.NSColor.whiteColor())
+        self._lbl_det.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self._lbl_det.setFont_(AppKit.NSFont.boldSystemFontOfSize_(22))
+        self._lbl_det.setBezeled_(False)
+        self._lbl_det.setEditable_(False)
+        self._lbl_det.setSelectable_(False)
+        self._lbl_det.setDrawsBackground_(False)
+        self._lbl_det.setAlignment_(AppKit.NSTextAlignmentCenter)
+        self._lbl_det.cell().setWraps_(True)
+        content.addSubview_(self._lbl_det)
 
         # Start hidden
         self._panel.orderOut_(None)
@@ -1511,23 +1514,22 @@ class NativeBanner:
                 self._visible = False
             return
 
-        # Show banner with issue summary
+        # Détail des alertes (ligne par ligne)
         n = len(issues)
         summary_parts = []
         for iss in issues[:3]:
             short = iss.split("\u2014")[0].strip()
             summary_parts.append(short)
-        text = f"\u26a0\ufe0f  {n} ALERTE{'S' if n > 1 else ''}  \u2014  "
-        text += "  |  ".join(summary_parts)
+        detail = f"\u26a0\ufe0f  {n} ALERTE{'S' if n > 1 else ''}  \u2014  " + "   |   ".join(summary_parts)
         if n > 3:
-            text += f"  (+{n-3})"
+            detail += f"  (+{n - 3})"
 
         try:
-            self._label.setStringValue_(text)
+            self._lbl_det.setStringValue_(detail)
         except Exception:
             pass
 
-        # Flash between two red shades
+        # Flash entre deux rouges
         color = ALERT_B if flash_state else ALERT_A
         self._panel.setBackgroundColor_(_hex_to_nscolor(color))
 
@@ -1537,7 +1539,6 @@ class NativeBanner:
         else:
             self._panel.orderFrontRegardless()
 
-        # Boost above OBS
         self._boost_above_obs()
 
     def _boost_above_obs(self):
