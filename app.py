@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.4.2"
+VERSION      = "2.4.3"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -123,6 +123,8 @@ DEFAULT_CONFIG = {
         "recipient": "",         # ex: "+33632548891"
         "cooldown_s": 600,       # 10 min entre SMS pour la même erreur
         "min_duration_s": 10,    # erreur doit durer 10s avant SMS
+        "send_from": "10:00",    # heure de début d'envoi
+        "send_until": "18:30",   # heure de fin d'envoi
     }
 }
 
@@ -812,11 +814,27 @@ class SMSNotifier:
         emoji = text.split(" ", 1)[0] if text else ""
         return f"{emoji}|{src}"
 
+    def _in_send_window(self):
+        """Vérifie si l'heure actuelle est dans la plage d'envoi configurée."""
+        try:
+            now_t = datetime.datetime.now().time()
+            from_s = self.cfg.get("send_from", "00:00")
+            until_s = self.cfg.get("send_until", "23:59")
+            h0, m0 = (int(x) for x in from_s.split(":"))
+            h1, m1 = (int(x) for x in until_s.split(":"))
+            start = datetime.time(h0, m0)
+            end   = datetime.time(h1, m1)
+            return start <= now_t <= end
+        except Exception:
+            return True  # en cas d'erreur de parsing, on envoie quand même
+
     def process(self, current_issues):
         """Appelé à chaque tick avec la liste des issues actuelles."""
         if not self.cfg.get("enabled", False):
             return
         if not self.cfg.get("api_key") or not self.cfg.get("recipient"):
+            return
+        if not self._in_send_window():
             return
 
         now = time.time()
@@ -843,11 +861,13 @@ class SMSNotifier:
     def notify_event(self, key, message):
         """Envoie un SMS one-shot pour un évènement (ex: déconnexion OBS).
 
-        Pas de durée minimale, mais cooldown respecté.
+        Pas de durée minimale, mais cooldown et plage horaire respectés.
         """
         if not self.cfg.get("enabled", False):
             return
         if not self.cfg.get("api_key") or not self.cfg.get("recipient"):
+            return
+        if not self._in_send_window():
             return
         now = time.time()
         cooldown = self.cfg.get("cooldown_s", 600)
