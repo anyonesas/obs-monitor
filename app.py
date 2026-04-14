@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.1.1"
+VERSION      = "2.1.2"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -751,24 +751,6 @@ class _FlippedView(AppKit.NSView):
         return True
 
 
-class _ButtonTarget(Foundation.NSObject):
-    """ObjC target for NSButton actions — bridges to a Python callback."""
-
-    def init(self):
-        self = Foundation.NSObject.init(self)
-        self._py_callback = None
-        return self
-
-    def setCallback_(self, callback):
-        self._py_callback = callback
-
-    def onClicked_(self, sender):
-        if self._py_callback:
-            try:
-                self._py_callback()
-            except Exception as e:
-                print(f"[btn_target] {e}")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Native NSPanel — floating panel above OBS Projector
@@ -797,7 +779,6 @@ class NativePanel:
         self._source_container = None
         self._save_btn = None
         self._save_callback = None
-        self._btn_target = None
         self._last_audio_names = []
         self._last_video_names = []
 
@@ -938,17 +919,10 @@ class NativePanel:
         )
         y += 22
 
-        # Save button
-        self._save_btn = AppKit.NSButton.alloc().initWithFrame_(
-            Foundation.NSMakeRect(12, y, cw - 24, 24)
-        )
-        self._save_btn.setTitle_("Enregistrer la sélection")
-        self._save_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        self._save_btn.setTarget_(None)
-        self._save_btn.setAction_(None)
-        self._save_btn.setEnabled_(False)
-        doc.addSubview_(self._save_btn)
-        y += 32
+        # Save hint
+        self._make_label(doc, 12, y, cw - 24, 14,
+                         "Enregistrer via le menu ⚡ OBS", FG2, 9, bold=False)
+        y += 22
 
         # ── Separator ──
         y = self._add_separator(doc, y, cw)
@@ -1090,12 +1064,7 @@ class NativePanel:
             self._video_cbs.append((name, cb))
             y += 20
 
-        # Reposition save button
         y += 8
-        if self._save_btn:
-            self._save_btn.setFrameOrigin_(Foundation.NSMakePoint(12, y))
-            self._save_btn.setEnabled_(True)
-            y += 32
 
         # Reposition everything below (info section separator, info, alerts, etc.)
         # We stored their initial Y offsets, so we calculate the delta
@@ -1111,13 +1080,8 @@ class NativePanel:
         return audio, video
 
     def set_save_callback(self, callback):
-        """Set callback for save button. callback() will be called on click."""
+        """Store callback — triggered via rumps menu, not panel button."""
         self._save_callback = callback
-        if self._save_btn and callback:
-            self._btn_target = _ButtonTarget.alloc().init()
-            self._btn_target.setCallback_(callback)
-            self._save_btn.setTarget_(self._btn_target)
-            self._save_btn.setAction_(Foundation.NSSelectorFromString("onClicked:"))
 
     # ── Boost above OBS ──
 
@@ -1727,15 +1691,6 @@ class OBSMonitorRumps(rumps.App):
         # Refresh sources periodically when connected
         if self._connected:
             self._refresh_sources()
-
-        # Check if save button was clicked (poll approach)
-        if self._panel._save_btn and self._panel._built:
-            try:
-                # NSButton doesn't have a simple "was clicked" state,
-                # so we use a periodic save check triggered by button state
-                pass  # Save is handled via menu or we add target-action later
-            except Exception:
-                pass
 
         # macOS notifications
         self._maybe_notify(issues)
