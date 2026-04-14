@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.4.1"
+VERSION      = "2.4.2"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -1522,26 +1522,30 @@ class NativeBanner:
         ]
         n_btns   = len(snooze_options)
         btn_w    = 220
-        btn_h    = 44
-        spacing  = 20
+        btn_h    = 50
+        spacing  = 24
         total_w  = n_btns * btn_w + (n_btns - 1) * spacing
         start_x  = (sw - total_w) / 2
-        btn_y    = sh * 0.16
+        btn_y    = sh * 0.12
 
         for i, (label, duration) in enumerate(snooze_options):
             bx = start_x + i * (btn_w + spacing)
             btn_rect = Foundation.NSMakeRect(bx, btn_y, btn_w, btn_h)
             btn = AppKit.NSButton.alloc().initWithFrame_(btn_rect)
-            btn.setTitle_(label)
-            btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
-            btn.setFont_(AppKit.NSFont.boldSystemFontOfSize_(14))
-            # Fond blanc, texte rouge foncé
+            btn.setBezelStyle_(AppKit.NSBezelStyleRegularSquare)
+            btn.setBordered_(False)
             btn.setWantsLayer_(True)
-            btn.layer().setCornerRadius_(10.0)
+            btn.layer().setCornerRadius_(12.0)
             btn.layer().setBackgroundColor_(
-                AppKit.NSColor.whiteColor().CGColor()
+                AppKit.NSColor.colorWithWhite_alpha_(1.0, 0.92).CGColor()
             )
-            btn.setContentTintColor_(_hex_to_nscolor(ALERT_A))
+            # Texte rouge foncé avec attributedTitle pour forcer la couleur
+            attrs = {
+                AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(ALERT_A),
+                AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(15),
+            }
+            astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(label, attrs)
+            btn.setAttributedTitle_(astr)
 
             # Cible ObjC pour l'action
             target = _SnoozeTarget.alloc().init()
