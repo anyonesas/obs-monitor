@@ -37,6 +37,8 @@
     "device": "9210|1",
     "recipient": "+33632548891",
     "cooldown_s": 600,
-    "min_duration_s": 10
+    "min_duration_s": 10,
+    "send_from": "10:00",
+    "send_until": "18:30"
   }
 }
