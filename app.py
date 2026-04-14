@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.1.2"
+VERSION      = "2.2.0"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -776,11 +776,11 @@ class NativePanel:
         # Source checkboxes
         self._audio_cbs = []   # [(name, NSButton), ...]
         self._video_cbs = []
-        self._source_container = None
-        self._save_btn = None
+        self._dynamic_views = []  # all views below fixed header — rebuilt on source change
         self._save_callback = None
         self._last_audio_names = []
         self._last_video_names = []
+        self._header_end_y = 0  # Y position after fixed header
 
     def build(self):
         """Must be called on the main thread (inside rumps/AppKit run loop)."""
@@ -874,8 +874,8 @@ class NativePanel:
     # ── Build all subviews inside the document view ──
 
     def _build_content(self, doc, cw):
-        """Build all UI elements in the flipped document view."""
-        y = 8  # top padding
+        """Build fixed header elements. Dynamic content is built by _rebuild_dynamic."""
+        y = 8
 
         # ── Status ──
         self._status_field = self._make_label(
@@ -895,41 +895,98 @@ class NativePanel:
         # ── Separator ──
         y = self._add_separator(doc, y, cw)
 
-        # ── Source selection header ──
-        self._audio_header = self._make_label(doc, 12, y, cw - 24, 16,
-                         "SOURCES AUDIO", ACCENT, 10, bold=True)
+        self._header_end_y = y
+
+        # Build initial dynamic content (placeholders)
+        self._rebuild_dynamic([], [], None)
+
+    def _rebuild_dynamic(self, audio_names, video_names, cfg):
+        """Rebuild all content below the fixed header (sources, info, alerts)."""
+        doc = self._doc
+        cw = self._doc_width
+
+        # Remove all previous dynamic views
+        for v in self._dynamic_views:
+            try:
+                v.removeFromSuperview()
+            except Exception:
+                pass
+        for _, cb in self._audio_cbs:
+            try:
+                cb.removeFromSuperview()
+            except Exception:
+                pass
+        for _, cb in self._video_cbs:
+            try:
+                cb.removeFromSuperview()
+            except Exception:
+                pass
+        self._dynamic_views = []
+        self._audio_cbs = []
+        self._video_cbs = []
+
+        y = self._header_end_y
+
+        # ── SOURCES AUDIO ──
+        self._dynamic_views.append(
+            self._make_label(doc, 12, y, cw - 24, 16, "SOURCES AUDIO", ACCENT, 10, bold=True)
+        )
         y += 20
 
-        # Placeholder for audio checkboxes (built dynamically)
-        self._audio_start_y = y
-        self._audio_placeholder = self._make_label(
-            doc, 20, y, cw - 32, 16,
-            "En attente de connexion…", FG2, 10, bold=False
-        )
-        y += 22
+        monitored_audio = set()
+        monitored_video = set()
+        if cfg:
+            monitored_audio = set(cfg["checks"]["audio"].get("monitor_inputs", []))
+            monitored_video = set(cfg["checks"]["video"].get("monitor_sources", []))
 
-        self._video_header = self._make_label(doc, 12, y, cw - 24, 16,
-                         "SOURCES VIDÉO", ACCENT, 10, bold=True)
+        if audio_names:
+            for name in audio_names:
+                checked = (not monitored_audio) or (name in monitored_audio)
+                cb = self._make_checkbox(name, checked, y, cw)
+                doc.addSubview_(cb)
+                self._audio_cbs.append((name, cb))
+                y += 20
+        else:
+            lbl = self._make_label(doc, 20, y, cw - 32, 16,
+                                   "En attente de connexion…", FG2, 10, bold=False)
+            self._dynamic_views.append(lbl)
+            y += 20
+        y += 6
+
+        # ── SOURCES VIDÉO ──
+        self._dynamic_views.append(
+            self._make_label(doc, 12, y, cw - 24, 16, "SOURCES VIDÉO", ACCENT, 10, bold=True)
+        )
         y += 20
 
-        self._video_start_y = y
-        self._video_placeholder = self._make_label(
-            doc, 20, y, cw - 32, 16,
-            "En attente de connexion…", FG2, 10, bold=False
-        )
-        y += 22
+        if video_names:
+            for name in video_names:
+                checked = (not monitored_video) or (name in monitored_video)
+                cb = self._make_checkbox(name, checked, y, cw)
+                doc.addSubview_(cb)
+                self._video_cbs.append((name, cb))
+                y += 20
+        else:
+            lbl = self._make_label(doc, 20, y, cw - 32, 16,
+                                   "En attente de connexion…", FG2, 10, bold=False)
+            self._dynamic_views.append(lbl)
+            y += 20
+        y += 4
 
-        # Save hint
-        self._make_label(doc, 12, y, cw - 24, 14,
-                         "Enregistrer via le menu ⚡ OBS", FG2, 9, bold=False)
-        y += 22
+        # ── Save hint ──
+        self._dynamic_views.append(
+            self._make_label(doc, 12, y, cw - 24, 14,
+                             "✓ La sélection se met à jour automatiquement", FG2, 9, bold=False)
+        )
+        y += 20
 
         # ── Separator ──
-        y = self._add_separator(doc, y, cw)
+        y = self._add_separator_dyn(doc, y, cw)
 
-        # ── Info section: "CE QUI EST SURVEILLÉ" ──
-        self._make_label(doc, 12, y, cw - 24, 16,
-                         "CE QUI EST SURVEILLÉ", CYAN, 10, bold=True)
+        # ── CE QUI EST SURVEILLÉ ──
+        self._dynamic_views.append(
+            self._make_label(doc, 12, y, cw - 24, 16, "CE QUI EST SURVEILLÉ", CYAN, 10, bold=True)
+        )
         y += 20
 
         self._info_field = AppKit.NSTextView.alloc().initWithFrame_(
@@ -942,19 +999,20 @@ class NativePanel:
         self._info_field.setFont_(AppKit.NSFont.systemFontOfSize_(10))
         self._info_field.setTextColor_(_hex_to_nscolor(FG2))
         doc.addSubview_(self._info_field)
+        self._dynamic_views.append(self._info_field)
         y += 66
 
         # ── Separator ──
-        y = self._add_separator(doc, y, cw)
+        y = self._add_separator_dyn(doc, y, cw)
 
-        # ── Issues header ──
-        self._make_label(doc, 12, y, cw - 24, 16,
-                         "ALERTES", RED, 10, bold=True)
+        # ── ALERTES ──
+        self._dynamic_views.append(
+            self._make_label(doc, 12, y, cw - 24, 16, "ALERTES", RED, 10, bold=True)
+        )
         y += 20
 
-        # ── Issues text view ──
         self._text_view = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(8, y, cw - 16, 200)
+            Foundation.NSMakeRect(8, y, cw - 16, 250)
         )
         self._text_view.setEditable_(False)
         self._text_view.setSelectable_(True)
@@ -964,12 +1022,9 @@ class NativePanel:
         self._text_view.textContainer().setWidthTracksTextView_(True)
         self._text_view.setHorizontallyResizable_(False)
         doc.addSubview_(self._text_view)
+        self._dynamic_views.append(self._text_view)
+        y += 256
 
-        self._issues_y = y
-        y += 206
-
-        # Track total content height
-        self._content_bottom = y
         doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 10, 600)))
 
     # ── Helper: create a label ──
@@ -1019,57 +1074,27 @@ class NativePanel:
         parent.addSubview_(sep)
         return y + 12
 
+    def _add_separator_dyn(self, parent, y, cw):
+        """Add separator and track it in dynamic views."""
+        sep = AppKit.NSBox.alloc().initWithFrame_(
+            Foundation.NSMakeRect(8, y + 4, cw - 16, 1)
+        )
+        sep.setBoxType_(AppKit.NSBoxSeparator)
+        parent.addSubview_(sep)
+        self._dynamic_views.append(sep)
+        return y + 12
+
     # ── Source checkboxes (dynamic) ──
 
     def refresh_sources(self, audio_names, video_names, cfg):
-        """Rebuild source checkboxes when OBS sources are discovered."""
+        """Rebuild source checkboxes and all dynamic content when sources change."""
         if not self._doc:
             return
         if audio_names == self._last_audio_names and video_names == self._last_video_names:
             return  # no change
         self._last_audio_names = list(audio_names)
         self._last_video_names = list(video_names)
-
-        # Remove old checkboxes
-        for _, cb in self._audio_cbs:
-            cb.removeFromSuperview()
-        for _, cb in self._video_cbs:
-            cb.removeFromSuperview()
-        self._audio_cbs = []
-        self._video_cbs = []
-
-        # Hide placeholders
-        self._audio_placeholder.setHidden_(True)
-        self._video_placeholder.setHidden_(True)
-
-        cw = self._doc_width
-        monitored_audio = set(cfg["checks"]["audio"].get("monitor_inputs", []))
-        monitored_video = set(cfg["checks"]["video"].get("monitor_sources", []))
-
-        y = self._audio_start_y
-        for name in audio_names:
-            cb = self._make_checkbox(name, name in monitored_audio or not monitored_audio, y, cw)
-            self._doc.addSubview_(cb)
-            self._audio_cbs.append((name, cb))
-            y += 20
-
-        # Reposition video header
-        y += 6
-        self._video_header.setFrameOrigin_(Foundation.NSMakePoint(12, y))
-        y += 20
-
-        for name in video_names:
-            cb = self._make_checkbox(name, name in monitored_video or not monitored_video, y, cw)
-            self._doc.addSubview_(cb)
-            self._video_cbs.append((name, cb))
-            y += 20
-
-        y += 8
-
-        # Reposition everything below (info section separator, info, alerts, etc.)
-        # We stored their initial Y offsets, so we calculate the delta
-        # and move them accordingly. For simplicity, just update the doc frame.
-        self._doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 400, 800)))
+        self._rebuild_dynamic(audio_names, video_names, cfg)
 
     def get_selected_sources(self):
         """Return (audio_names, video_names) of checked sources."""
@@ -1412,15 +1437,15 @@ class OBSMonitorRumps(rumps.App):
         self._update_ver = None
         self._update_url = None
         self._prev_issues = []
+        self._transparent = False
+        self._last_checkbox_sync = 0
 
         # Build menu
         self._issues_section = rumps.MenuItem("Aucun problème", callback=None)
         self._issues_section.set_callback(None)
         self._show_panel_item = rumps.MenuItem("Afficher le panneau", callback=self._on_show_panel)
         self._hide_panel_item = rumps.MenuItem("Masquer le panneau", callback=self._on_hide_panel)
-
-        # Save sources selection
-        self._save_sources_item = rumps.MenuItem("Enregistrer la sélection", callback=self._on_save_sources_menu)
+        self._transparent_item = rumps.MenuItem("Panneau transparent", callback=self._on_toggle_transparent)
 
         # OBS connection config
         self._config_item = rumps.MenuItem("Configuration OBS…", callback=self._on_config)
@@ -1433,8 +1458,8 @@ class OBSMonitorRumps(rumps.App):
             None,
             self._show_panel_item,
             self._hide_panel_item,
+            self._transparent_item,
             None,
-            self._save_sources_item,
             self._config_item,
             self._update_item,
             None,
@@ -1446,6 +1471,15 @@ class OBSMonitorRumps(rumps.App):
 
     def _on_hide_panel(self, _):
         self._panel.hide()
+
+    def _on_toggle_transparent(self, _):
+        self._transparent = not self._transparent
+        if self._transparent:
+            self._panel._panel.setAlphaValue_(0.03)
+            self._transparent_item.title = "Panneau opaque"
+        else:
+            self._panel._panel.setAlphaValue_(0.97)
+            self._transparent_item.title = "Panneau transparent"
 
     def _on_quit(self, _):
         self._save_positions()
@@ -1654,6 +1688,24 @@ class OBSMonitorRumps(rumps.App):
         except Exception as e:
             print(f"[save_sources] {e}")
 
+    def _sync_checkboxes(self):
+        """Auto-sync checkbox state to config (no notification)."""
+        try:
+            audio_sel, video_sel = self._panel.get_selected_sources()
+            old_a = self._cfg["checks"]["audio"].get("monitor_inputs", [])
+            old_v = self._cfg["checks"]["video"].get("monitor_sources", [])
+            if sorted(audio_sel) != sorted(old_a) or sorted(video_sel) != sorted(old_v):
+                self._cfg["checks"]["audio"]["monitor_inputs"] = audio_sel
+                self._cfg["checks"]["video"]["monitor_sources"] = video_sel
+                save_config(self._cfg)
+                # Update info
+                audio_names = self._audio.known_inputs()
+                video_names = self._video.known_sources()
+                self._panel.update_info(audio_names, video_names, self._cfg)
+                print(f"[auto-save] audio={audio_sel} vidéo={video_sel}")
+        except Exception:
+            pass
+
     # ── Tick (rumps timer) ───────────────────────────────────────────────────
 
     @rumps.timer(0.4)
@@ -1691,6 +1743,12 @@ class OBSMonitorRumps(rumps.App):
         # Refresh sources periodically when connected
         if self._connected:
             self._refresh_sources()
+
+        # Auto-sync checkbox state to config every 2s
+        now_t = time.time()
+        if self._connected and now_t - self._last_checkbox_sync >= 2:
+            self._last_checkbox_sync = now_t
+            self._sync_checkboxes()
 
         # macOS notifications
         self._maybe_notify(issues)
