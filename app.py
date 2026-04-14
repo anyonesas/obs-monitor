@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.3.4"
+VERSION      = "2.3.5"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -873,6 +873,8 @@ class SMSNotifier:
             }
             url = self.API_URL + "?" + _urlparse.urlencode(params)
             req = urllib.request.Request(url, method="GET")
+            req.add_header("User-Agent", "curl/8.7.1")
+            req.add_header("Accept", "*/*")
             # SSL context sans vérif : Python bundlé PyInstaller n'a pas les CA macOS
             import ssl as _ssl
             ctx = _ssl.create_default_context()
