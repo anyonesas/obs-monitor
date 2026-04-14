@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.1.0"
+VERSION      = "2.1.1"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -753,18 +753,19 @@ class _FlippedView(AppKit.NSView):
 
 class _ButtonTarget(Foundation.NSObject):
     """ObjC target for NSButton actions — bridges to a Python callback."""
-    _callback = None
 
-    def initWithCallback_(self, callback):
+    def init(self):
         self = Foundation.NSObject.init(self)
-        if self is not None:
-            self._callback = callback
+        self._py_callback = None
         return self
 
+    def setCallback_(self, callback):
+        self._py_callback = callback
+
     def onClicked_(self, sender):
-        if self._callback:
+        if self._py_callback:
             try:
-                self._callback()
+                self._py_callback()
             except Exception as e:
                 print(f"[btn_target] {e}")
 
@@ -1113,7 +1114,8 @@ class NativePanel:
         """Set callback for save button. callback() will be called on click."""
         self._save_callback = callback
         if self._save_btn and callback:
-            self._btn_target = _ButtonTarget.alloc().initWithCallback_(callback)
+            self._btn_target = _ButtonTarget.alloc().init()
+            self._btn_target.setCallback_(callback)
             self._save_btn.setTarget_(self._btn_target)
             self._save_btn.setAction_(Foundation.NSSelectorFromString("onClicked:"))
 
