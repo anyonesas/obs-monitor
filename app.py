@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.2.0"
+VERSION      = "2.2.1"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -1311,6 +1311,7 @@ class NativeBanner:
         self._panel.setBackgroundColor_(_hex_to_nscolor(ALERT_A))
         self._panel.setAlphaValue_(0.95)
         self._panel.setSharingType_(1)
+        self._panel.setMovableByWindowBackground_(True)
 
         # Rounded corners
         self._panel.contentView().setWantsLayer_(True)
