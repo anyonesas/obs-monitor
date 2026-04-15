@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.4.6"
+VERSION      = "2.4.7"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -714,7 +714,9 @@ class VideoMonitor:
             self._known      = found
 
     def _capture(self, client, name):
-        for fmt in ("jpg", "png"):
+        # PNG d'abord : lossless, pas d'artefacts JPEG qui fausseraient
+        # la détection de gel (max_diff fluctuant à cause de la recompression)
+        for fmt in ("png", "jpg"):
             try:
                 resp = client.get_source_screenshot(
                     name=name, img_format=fmt,
@@ -745,10 +747,10 @@ class VideoMonitor:
             # Pour les images sombres, le bruit capteur cause des variations
             # de pixels même sur une scène statique → seuil max_diff plus souple
             if brightness < self.cfg.get("dark_threshold", 30):
-                max_diff_limit = 30   # images sombres : bruit capteur important
+                max_diff_limit = 40   # images sombres : bruit capteur important
                 sim_threshold  = 0.990
             else:
-                max_diff_limit = 15   # images normales
+                max_diff_limit = 30   # images normales (marge pour artefacts résiduels)
                 sim_threshold  = self.cfg["freeze_threshold"]
 
             # Vrai freeze = similarité très haute ET aucun pixel n'a vraiment bougé
