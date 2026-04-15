@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.4.7"
+VERSION      = "2.4.8"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -853,7 +853,8 @@ class SMSNotifier:
                 last_t  = self._last_sent.get(key, 0)
                 if (now - first_t) >= min_dur and (now - last_t) >= cooldown:
                     self._last_sent[key] = now
-                    self._send_async(text)
+                    ts = time.strftime("%H:%M")
+                    self._send_async(f"[{ts}] {text}")
 
             # Nettoyer les erreurs qui ne sont plus actives
             for key in list(self._first_seen.keys()):
@@ -1599,14 +1600,18 @@ class NativeBanner:
         if not self._panel:
             return
 
-        # Snooze actif : bannière muette
-        if time.time() < self._snooze_until:
+        # Si plus d'alerte : cacher et annuler le snooze (problème résolu)
+        if not issues:
+            if self._snooze_until > 0:
+                self._snooze_until = 0.0
+                print("[banner] problème résolu — snooze annulé")
             if self._visible:
                 self._panel.orderOut_(None)
                 self._visible = False
             return
 
-        if not issues:
+        # Snooze actif : bannière muette
+        if time.time() < self._snooze_until:
             if self._visible:
                 self._panel.orderOut_(None)
                 self._visible = False
