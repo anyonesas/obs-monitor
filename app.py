@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.49"
+VERSION      = "2.5.50"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -2296,13 +2296,14 @@ class NativePanel:
     so it can appear above OBS Projector (Metal rendering).
     Contains: status, source selection checkboxes, monitoring info, issues list.
     """
-    W = 300
-    PANEL_H = 650
+    W = 360
+    PANEL_H = 680
 
     def __init__(self):
         self._panel = None
         self._text_view = None
         self._status_field = None
+        self._scene_field  = None
         self._update_field = None
         self._info_field = None
         self._lock = threading.Lock()
@@ -2314,6 +2315,7 @@ class NativePanel:
         self._save_callback = None
         self._last_audio_names = []
         self._last_video_names = []
+        self._last_scene = None
         self._header_end_y = 0  # Y position after fixed header
 
     def build(self):
@@ -2409,18 +2411,25 @@ class NativePanel:
 
     def _build_content(self, doc, cw):
         """Build fixed header elements. Dynamic content is built by _rebuild_dynamic."""
-        y = 8
+        y = 14
 
-        # ── Status ──
+        # ── Statut connexion (gros, gras, avec dot colorée) ──
         self._status_field = self._make_label(
-            doc, 12, y, cw - 24, 18,
-            "Connexion à OBS…", ORANGE, 12, bold=False
+            doc, 16, y, cw - 32, 22,
+            "● Connexion à OBS…", ORANGE, 14, bold=True
+        )
+        y += 28
+
+        # ── Scène OBS courante (sous-texte discret) ──
+        self._scene_field = self._make_label(
+            doc, 16, y, cw - 32, 18,
+            "Scène : —", FG2, 11, bold=False
         )
         y += 24
 
-        # ── Update notification (hidden) ──
+        # ── Update notification (masquée par défaut) ──
         self._update_field = self._make_label(
-            doc, 12, y, cw - 24, 16,
+            doc, 16, y, cw - 32, 16,
             "", GREEN, 11, bold=True
         )
         self._update_field.setHidden_(True)
@@ -2459,13 +2468,13 @@ class NativePanel:
         self._audio_cbs = []
         self._video_cbs = []
 
-        y = self._header_end_y
+        y = self._header_end_y + 6
 
         # ── SOURCES AUDIO ──
         self._dynamic_views.append(
-            self._make_label(doc, 12, y, cw - 24, 16, "SOURCES AUDIO", ACCENT, 10, bold=True)
+            self._make_label(doc, 16, y, cw - 32, 18, "SOURCES AUDIO", ACCENT, 11, bold=True)
         )
-        y += 20
+        y += 24
 
         monitored_audio = None  # None = tout coché, set() = rien coché
         monitored_video = None
@@ -2481,19 +2490,19 @@ class NativePanel:
                 cb = self._make_checkbox(name, checked, y, cw)
                 doc.addSubview_(cb)
                 self._audio_cbs.append((name, cb))
-                y += 20
+                y += 24
         else:
-            lbl = self._make_label(doc, 20, y, cw - 32, 16,
-                                   "En attente de connexion…", FG2, 10, bold=False)
+            lbl = self._make_label(doc, 24, y, cw - 40, 18,
+                                   "En attente de connexion…", FG2, 11, bold=False)
             self._dynamic_views.append(lbl)
-            y += 20
-        y += 6
+            y += 22
+        y += 10
 
         # ── SOURCES VIDÉO ──
         self._dynamic_views.append(
-            self._make_label(doc, 12, y, cw - 24, 16, "SOURCES VIDÉO", ACCENT, 10, bold=True)
+            self._make_label(doc, 16, y, cw - 32, 18, "SOURCES VIDÉO", ACCENT, 11, bold=True)
         )
-        y += 20
+        y += 24
 
         if video_names:
             for name in video_names:
@@ -2501,67 +2510,69 @@ class NativePanel:
                 cb = self._make_checkbox(name, checked, y, cw)
                 doc.addSubview_(cb)
                 self._video_cbs.append((name, cb))
-                y += 20
+                y += 24
         else:
-            lbl = self._make_label(doc, 20, y, cw - 32, 16,
-                                   "En attente de connexion…", FG2, 10, bold=False)
+            lbl = self._make_label(doc, 24, y, cw - 40, 18,
+                                   "En attente de connexion…", FG2, 11, bold=False)
             self._dynamic_views.append(lbl)
-            y += 20
-        y += 4
+            y += 22
+        y += 6
 
         # ── Save hint ──
         self._dynamic_views.append(
-            self._make_label(doc, 12, y, cw - 24, 14,
-                             "✓ La sélection se met à jour automatiquement", FG2, 9, bold=False)
+            self._make_label(doc, 16, y, cw - 32, 14,
+                             "✓ Enregistrement automatique par scène", FG2, 10, bold=False)
         )
-        y += 20
+        y += 22
 
         # ── Separator ──
         y = self._add_separator_dyn(doc, y, cw)
+        y += 4
 
         # ── CE QUI EST SURVEILLÉ ──
         self._dynamic_views.append(
-            self._make_label(doc, 12, y, cw - 24, 16, "CE QUI EST SURVEILLÉ", CYAN, 10, bold=True)
+            self._make_label(doc, 16, y, cw - 32, 18, "CE QUI EST SURVEILLÉ", CYAN, 11, bold=True)
         )
-        y += 20
+        y += 24
 
         self._info_field = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(12, y, cw - 24, 60)
+            Foundation.NSMakeRect(16, y, cw - 32, 76)
         )
         self._info_field.setEditable_(False)
         self._info_field.setSelectable_(False)
         self._info_field.setRichText_(True)
         self._info_field.setDrawsBackground_(False)
-        self._info_field.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+        self._info_field.setFont_(AppKit.NSFont.systemFontOfSize_(11))
         self._info_field.setTextColor_(_hex_to_nscolor(FG2))
         doc.addSubview_(self._info_field)
         self._dynamic_views.append(self._info_field)
-        y += 66
+        y += 82
 
         # ── Separator ──
         y = self._add_separator_dyn(doc, y, cw)
+        y += 4
 
         # ── ALERTES ──
         self._dynamic_views.append(
-            self._make_label(doc, 12, y, cw - 24, 16, "ALERTES", RED, 10, bold=True)
+            self._make_label(doc, 16, y, cw - 32, 18, "ALERTES", RED, 11, bold=True)
         )
-        y += 20
+        y += 24
 
         self._text_view = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(8, y, cw - 16, 250)
+            Foundation.NSMakeRect(10, y, cw - 20, 260)
         )
         self._text_view.setEditable_(False)
         self._text_view.setSelectable_(True)
         self._text_view.setRichText_(True)
         self._text_view.setDrawsBackground_(False)
-        self._text_view.setTextContainerInset_(Foundation.NSMakeSize(4, 4))
+        self._text_view.setTextContainerInset_(Foundation.NSMakeSize(6, 6))
         self._text_view.textContainer().setWidthTracksTextView_(True)
         self._text_view.setHorizontallyResizable_(False)
         doc.addSubview_(self._text_view)
         self._dynamic_views.append(self._text_view)
-        y += 256
+        y += 266
 
-        doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 10, 600)))
+        doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 14, 640)))
 
     # ── Helper: create a label ──
 
@@ -2586,17 +2597,17 @@ class NativePanel:
     def _make_checkbox(self, name, checked, y, cw):
         """Create a styled NSButton checkbox."""
         cb = AppKit.NSButton.alloc().initWithFrame_(
-            Foundation.NSMakeRect(16, y, cw - 32, 18)
+            Foundation.NSMakeRect(20, y, cw - 40, 20)
         )
         cb.setButtonType_(AppKit.NSButtonTypeSwitch)
         cb.setTitle_(name)
-        cb.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+        cb.setFont_(AppKit.NSFont.systemFontOfSize_(12))
         cb.setState_(AppKit.NSControlStateValueOn if checked else AppKit.NSControlStateValueOff)
         cell = cb.cell()
         if cell and hasattr(cell, 'setAttributedTitle_'):
             attrs = {
                 AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
-                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(11),
+                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
             }
             astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(name, attrs)
             cell.setAttributedTitle_(astr)
@@ -2622,14 +2633,23 @@ class NativePanel:
 
     # ── Source checkboxes (dynamic) ──
 
-    def refresh_sources(self, audio_names, video_names, cfg):
-        """Rebuild source checkboxes and all dynamic content when sources change."""
+    def refresh_sources(self, audio_names, video_names, cfg, scene_name=None):
+        """Rebuild source checkboxes and all dynamic content when sources or scene change."""
         if not self._doc:
             return
-        if audio_names == self._last_audio_names and video_names == self._last_video_names:
+        # MAJ du champ scene meme si rien d'autre ne change
+        if self._scene_field:
+            try:
+                self._scene_field.setStringValue_(f"Scène : {scene_name or '—'}")
+            except Exception:
+                pass
+        if (audio_names == self._last_audio_names
+            and video_names == self._last_video_names
+            and scene_name == self._last_scene):
             return  # no change
         self._last_audio_names = list(audio_names)
         self._last_video_names = list(video_names)
+        self._last_scene = scene_name
         self._rebuild_dynamic(audio_names, video_names, cfg)
 
     def get_selected_sources(self):
@@ -2685,15 +2705,23 @@ class NativePanel:
         except Exception as e:
             print(f"[panel.status] {e}")
 
-    def update_info(self, audio_names, video_names, cfg):
+    def update_info(self, audio_names, video_names, cfg, scene_name=None):
         """Update the 'CE QUI EST SURVEILLÉ' info section."""
         if not self._info_field:
             return
         try:
             acfg = cfg["checks"]["audio"]
             vcfg = cfg["checks"]["video"]
-            mon_a = acfg.get("monitor_inputs", None)
-            mon_v = vcfg.get("monitor_sources", None)
+            # Selection par-scene si dispo, sinon legacy global
+            mon_a = None
+            mon_v = None
+            if scene_name and scene_name in cfg.get("scenes", {}):
+                mon_a = cfg["scenes"][scene_name].get("audio")
+                mon_v = cfg["scenes"][scene_name].get("video")
+            if mon_a is None:
+                mon_a = acfg.get("monitor_inputs", None)
+            if mon_v is None:
+                mon_v = vcfg.get("monitor_sources", None)
             a_str = "(toutes)" if mon_a is None else (", ".join(mon_a) if mon_a else "(aucune)")
             v_str = "(toutes)" if mon_v is None else (", ".join(mon_v) if mon_v else "(aucune)")
 
@@ -2711,7 +2739,7 @@ class NativePanel:
             storage.deleteCharactersInRange_(rng)
             attrs = {
                 AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG2),
-                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(10),
+                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(11),
             }
             astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
             storage.appendAttributedString_(astr)
@@ -2732,17 +2760,17 @@ class NativePanel:
             if not issues:
                 attrs = {
                     AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(GREEN),
-                    AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
+                    AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(13),
                 }
                 ok_str = Foundation.NSAttributedString.alloc().initWithString_attributes_(
-                    "\u2705  Aucun problème détecté\n", attrs
+                    "\u2705  Tout est OK\n", attrs
                 )
                 storage.appendAttributedString_(ok_str)
             else:
                 for i, issue in enumerate(issues):
                     attrs = {
                         AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(RED),
-                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(11),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
                     }
                     line = issue + "\n"
                     if i < len(issues) - 1:
@@ -3929,13 +3957,15 @@ class OBSMonitorRumps(rumps.App):
 
         # Update panel checkboxes
         try:
-            self._panel.refresh_sources(audio_names, video_names, self._cfg)
+            self._panel.refresh_sources(audio_names, video_names,
+                                        self._cfg, self._current_scene)
         except Exception as e:
             print(f"[src_refresh] panel: {e}")
 
         # Update panel info section
         try:
-            self._panel.update_info(audio_names, video_names, self._cfg)
+            self._panel.update_info(audio_names, video_names,
+                                    self._cfg, self._current_scene)
         except Exception as e:
             print(f"[src_refresh] info: {e}")
 
@@ -3953,7 +3983,7 @@ class OBSMonitorRumps(rumps.App):
             # Update info display
             audio_names = self._audio.known_inputs()
             video_names = self._video.known_sources()
-            self._panel.update_info(audio_names, video_names, self._cfg)
+            self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
             print(f"[save] audio={audio_sel} vidéo={video_sel}")
             # Confirm via notification
             rumps.notification(
@@ -3983,7 +4013,7 @@ class OBSMonitorRumps(rumps.App):
                 # Update info
                 audio_names = self._audio.known_inputs()
                 video_names = self._video.known_sources()
-                self._panel.update_info(audio_names, video_names, self._cfg)
+                self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
                 print(f"[auto-save] audio={audio_sel} vidéo={video_sel}")
         except Exception:
             pass
