@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.0"
+VERSION      = "2.5.49"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -38,6 +38,13 @@ try:
     HAVE_QUARTZ = True
 except ImportError:
     HAVE_QUARTZ = False
+
+try:
+    import Vision
+    # CIImage est dans Quartz (pyobjc-framework-Quartz), pas dans un module CoreImage séparé
+    HAVE_VISION = True
+except ImportError:
+    HAVE_VISION = False
 
 # API CoreGraphics privee — set window level directement par CGWindowID
 # Contourne le probleme NSApp.windows() vide dans les apps PyInstaller bundlees
@@ -96,14 +103,17 @@ DEFAULT_CONFIG = {
     "obs": {"host": "localhost", "port": 4455, "password": ""},
     "checks": {
         "audio": {
-            "silence_db": -50,
-            "silence_duration_s": 3,
+            "silence_db": -62,
+            "silence_duration_s": 10,
             "clip_db": -1,
             "flat_std_db": 2.5,
             "flat_min_db": -45,
             "flat_duration_s": 5,
             "clip_ratio": 0.4,
-            "monitor_inputs": None
+            "monitor_inputs": None,
+            "silence_enabled": True,
+            "clip_enabled": True,
+            "flat_enabled": True,
         },
         "video": {
             "freeze_threshold": 0.997,
@@ -111,33 +121,53 @@ DEFAULT_CONFIG = {
             "dark_threshold": 30,
             "bright_threshold": 242,
             "check_interval_s": 2,
-            "monitor_sources": None
+            "monitor_sources": None,
+            "headroom_threshold": 0.35,   # ratio max d'espace vide au-dessus du visage (0–1)
+            "headroom_duration_s": 5,     # secondes avant d'afficher l'avertissement cadrage
+            "freeze_enabled": True,
+            "dark_enabled": True,
+            "bright_enabled": True,
+            "headroom_enabled": True,
         }
     },
-    # Selection par scene OBS : { "Scene 1": {"audio": [...], "video": [...]} }
-    # Si une scene est absente, on retombe sur checks.audio.monitor_inputs (legacy).
-    "scenes": {},
     "panel": {"x": None, "y": None},
-    "banner": {"y": None},
+    "banner": {
+        "y": None,
+        "active_from": "00:00",    # heure début écran rouge (HH:MM)
+        "active_until": "23:59",   # heure fin écran rouge (HH:MM)
+        "active_days": "lun,mar,mer,jeu,ven,sam,dim",  # jours actifs (abréviations FR séparées par virgule)
+        "cooldown_s": 0,           # délai avant réactivation écran rouge après résolution (s)
+        "notif_cooldown_s": 1800,  # délai min entre deux notifications macOS (s) — défaut 30 min
+        "enabled": True,
+        "notif_enabled": True,
+    },
+    "warn_banner": {
+        "active_from": "00:00",
+        "active_until": "23:59",
+        "active_days": "lun,mar,mer,jeu,ven,sam,dim",
+    },
     "sms": {
         "enabled": False,
         "api_key": "",
         "device": "",            # ex: "9210|0"
         "recipient": "",         # ex: "+33632548891"
         "cooldown_s": 600,       # 10 min entre SMS pour la même erreur
-        "min_duration_s": 10,    # erreur doit durer 10s avant SMS
+        "min_duration_s": 30,    # erreur doit durer 30s avant SMS (rouge 10s + 30s de vrai silence)
         "send_from": "10:00",    # heure de début d'envoi
         "send_until": "18:30",   # heure de fin d'envoi
+        "days": "lun,mar,mer,jeu,ven,sam,dim",
     },
-    "face_switch": {
+    "scene_switch": {
         "enabled": False,
-        "camera_source": "",     # source OBS a analyser (vide = auto)
-        "scene_1p": "",          # scene si 1 visage detecte (vide = auto par nom)
-        "scene_2p": "",          # scene si 2 visages
-        "stable_s": 10,          # duree consecutive avant switch
-        "cooldown_s": 5,         # delai mini entre 2 switches
-        "poll_s": 1.0,           # frequence d'analyse
-    }
+        "scene_1p": "",   # nom de scène OBS 1 personne
+        "scene_2p": "",   # nom de scène OBS 2 personnes
+        "trigger_s": 10,  # secondes de détection avant switch (10s par défaut)
+        "cooldown_s": 30, # secondes de cooldown après switch
+    },
+    # Selection des sources par scene OBS :
+    #   { "Nom scene": { "audio": ["Micro 1"], "video": ["Cam Wide"] } }
+    # Si une scene n'a pas d'entree, on retombe sur checks.audio.monitor_inputs (legacy).
+    "scenes": {},
 }
 
 def _bundled_config():
@@ -170,13 +200,23 @@ def load_config():
     else:
         for k, v in DEFAULT_CONFIG["sms"].items():
             c["sms"].setdefault(k, v)
-    # Scenes (selection par scene) + face_switch ajoutes en v2.5
-    c.setdefault("scenes", {})
-    if "face_switch" not in c:
-        c["face_switch"] = dict(DEFAULT_CONFIG["face_switch"])
+    # Banner defaults
+    if "banner" not in c:
+        c["banner"] = dict(DEFAULT_CONFIG["banner"])
     else:
-        for k, v in DEFAULT_CONFIG["face_switch"].items():
-            c["face_switch"].setdefault(k, v)
+        for k, v in DEFAULT_CONFIG["banner"].items():
+            c["banner"].setdefault(k, v)
+    if "warn_banner" not in c:
+        c["warn_banner"] = dict(DEFAULT_CONFIG["warn_banner"])
+    else:
+        for k, v in DEFAULT_CONFIG["warn_banner"].items():
+            c["warn_banner"].setdefault(k, v)
+    if "scene_switch" not in c:
+        c["scene_switch"] = dict(DEFAULT_CONFIG["scene_switch"])
+    else:
+        for k, v in DEFAULT_CONFIG["scene_switch"].items():
+            c["scene_switch"].setdefault(k, v)
+    c.setdefault("scenes", {})
     return c
 
 def save_config(cfg):
@@ -204,6 +244,8 @@ FG2     = "#565f89"
 BORDER  = "#292e42"
 ALERT_A = "#7a1520"
 ALERT_B = "#b01a28"
+WARN_A  = "#7a5c00"   # ambre foncé (fond écran jaune)
+WARN_B  = "#c49500"   # ambre vif (flash)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -394,61 +436,158 @@ def _real_app_path():
 
 def install_update(dmg_url, app_path, on_progress=None):
     """
-    Telecharge le DMG, monte, puis lance un script shell qui :
-      - attend que l'app courante quitte (plus de verrou de fichier)
-      - remplace le .app
-      - relance la nouvelle version
-    L'app quitte proprement avec sys.exit() pendant ce temps.
+    Télécharge le DMG, monte, remplace le .app PENDANT QUE l'app tourne
+    (macOS autorise le remplacement d'un bundle en cours d'exécution),
+    puis lance un mini-script qui attend la mort du PID et fait juste `open`.
     """
-    try:
-        # 1. Telechargement
-        tmp_dmg = os.path.join(tempfile.gettempdir(), "OBSMonitor_update.dmg")
-        if on_progress: on_progress("Téléchargement...")
-        subprocess.run(
-            ["curl", "-L", "-o", tmp_dmg, "--max-time", "180", dmg_url],
-            check=True
-        )
+    import shutil
+    log_path = os.path.join(CONFIG_DIR, "update.log")
 
-        # 2. Montage
-        if on_progress: on_progress("Installation...")
+    def ulog(msg):
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        try:
+            with open(log_path, "a") as _f:
+                _f.write(line)
+        except Exception:
+            pass
+        if on_progress:
+            try:
+                on_progress(msg)
+            except Exception:
+                pass
+
+    try:
+        ulog(f"=== Mise à jour démarrée ===")
+        ulog(f"URL    : {dmg_url}")
+        ulog(f"dst    : {app_path}")
+
+        # ── 1. Téléchargement ──────────────────────────────────────────────
+        tmp_dmg = os.path.join(tempfile.gettempdir(), "OBSMonitor_update.dmg")
+        ulog("Téléchargement…")
+        r = subprocess.run(
+            ["curl", "-L", "-o", tmp_dmg, "--max-time", "300", dmg_url],
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            ulog(f"ERREUR curl ({r.returncode}) : {r.stderr.decode()[:300]}")
+            return
+        ulog(f"Téléchargé : {tmp_dmg}  ({os.path.getsize(tmp_dmg)//1024} Ko)")
+
+        # ── 2. Montage ─────────────────────────────────────────────────────
         mnt = os.path.join(tempfile.gettempdir(), "OBSMonitor_mnt")
-        subprocess.run(["hdiutil", "attach", tmp_dmg,
-                        "-mountpoint", mnt, "-quiet", "-nobrowse"],
-                       check=True)
+        # Démontage préventif si déjà monté
+        subprocess.run(["hdiutil", "detach", mnt, "-quiet", "-force"],
+                       capture_output=True)
+        if os.path.exists(mnt):
+            shutil.rmtree(mnt, ignore_errors=True)
+
+        ulog("Montage DMG…")
+        r = subprocess.run(
+            ["hdiutil", "attach", tmp_dmg, "-mountpoint", mnt,
+             "-quiet", "-nobrowse"],
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            ulog(f"ERREUR hdiutil attach ({r.returncode}) : {r.stderr.decode()[:300]}")
+            return
+        ulog(f"Monté sur {mnt}  (contenu : {os.listdir(mnt)})")
 
         src_app = os.path.join(mnt, "OBSMonitor.app")
-        dst_app = app_path
+        if not os.path.exists(src_app):
+            ulog(f"ERREUR : OBSMonitor.app absent du DMG")
+            subprocess.run(["hdiutil", "detach", mnt, "-quiet"], capture_output=True)
+            return
 
-        # 3. Script qui attend la fin de l'app puis remplace et relance
+        dst_app     = app_path
+        staging_app = dst_app + "_update_staging"
+
+        # ── 3. Copier la NOUVELLE version dans un dossier staging ─────────
+        # On NE TOUCHE PAS à l'app courante pendant qu'elle tourne.
+        # Le swap (rm + mv) se fera dans le script de relance, après la mort du process.
+        ulog(f"Copie staging : {src_app} → {staging_app}…")
+        r = subprocess.run(
+            ["bash", "-c", f"rm -rf '{staging_app}' && ditto '{src_app}' '{staging_app}' && xattr -cr '{staging_app}'"],
+            capture_output=True,
+        )
+        ulog(f"Copie staging → {r.returncode}  {r.stderr.decode()[:200]}")
+
+        if r.returncode != 0:
+            ulog("Tentative avec privilèges admin (osascript)…")
+            osa_cmd = (
+                f"rm -rf '{staging_app}' ; "
+                f"ditto '{src_app}' '{staging_app}' ; "
+                f"xattr -cr '{staging_app}'"
+            )
+            r2 = subprocess.run(
+                ["osascript", "-e", f"do shell script \"{osa_cmd.replace(chr(34), chr(92)+chr(34))}\" with administrator privileges"],
+                capture_output=True,
+            )
+            ulog(f"osascript staging → {r2.returncode}  {r2.stderr.decode()[:200]}")
+            if r2.returncode != 0:
+                ulog("ERREUR copie staging impossible — abandon")
+                return
+
+        if not os.path.exists(staging_app):
+            ulog("ERREUR : staging introuvable après copie — abandon")
+            return
+
+        ulog("Copie staging OK")
+
+        # ── 4. Démonter DMG (on n'en a plus besoin) ───────────────────────
+        subprocess.run(["hdiutil", "detach", mnt, "-quiet"], capture_output=True)
+        try:
+            os.remove(tmp_dmg)
+        except Exception:
+            pass
+        ulog("DMG démonté")
+
+        # ── 5. Script de swap + relance (process indépendant) ─────────────
+        # Le swap (rm + mv) se fait APRÈS la mort de ce process.
+        # On utilise start_new_session=True pour que le script survive au SIGKILL.
         pid = os.getpid()
-        script = f"""#!/bin/bash
-# Attend que l'app courante se ferme
-while kill -0 {pid} 2>/dev/null; do sleep 0.3; done
-sleep 0.5
-# Remplace le .app (ditto preserve la signature de code)
-rm -rf "{dst_app}"
-ditto "{src_app}" "{dst_app}"
-xattr -cr "{dst_app}"
-# Nettoie
-hdiutil detach "{mnt}" -quiet 2>/dev/null || true
-rm -f "{tmp_dmg}"
-# Relance la nouvelle version
-open "{dst_app}"
-"""
-        script_path = os.path.join(tempfile.gettempdir(), "obs_monitor_update.sh")
+        swap_cmd = (
+            f"rm -rf '{dst_app}' && "
+            f"mv '{staging_app}' '{dst_app}' && "
+            f"xattr -cr '{dst_app}'"
+        )
+        script = (
+            "#!/bin/bash\n"
+            f"while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n"
+            "sleep 0.5\n"
+            f"{swap_cmd} 2>/tmp/obs_swap.log\n"
+            f"open '{dst_app}'\n"
+        )
+        script_path = os.path.join(tempfile.gettempdir(), "obs_monitor_open.sh")
         with open(script_path, "w") as f:
             f.write(script)
         os.chmod(script_path, 0o755)
-        subprocess.Popen(["bash", script_path],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 4. Quitte l'app — le script prend le relais
-        if on_progress: on_progress("Redémarrage...")
-        time.sleep(0.8)
-        os.kill(os.getpid(), 9)   # force quit propre
+        try:
+            subprocess.Popen(
+                ["bash", script_path],
+                start_new_session=True,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            ulog("Script swap+relance lancé (start_new_session)")
+        except Exception as e:
+            ulog(f"start_new_session échoué ({e}) — fallback osascript")
+            osa = f"do shell script \"bash '{script_path}' &>/dev/null &\""
+            subprocess.Popen(["osascript", "-e", osa])
+            ulog("Script lancé via osascript")
+
+        ulog("Fermeture dans 1s…")
+
+        # ── 6. Quitte proprement ───────────────────────────────────────────
+        time.sleep(1.0)
+        os.kill(os.getpid(), 9)
 
     except Exception as e:
-        if on_progress: on_progress(f"Erreur : {e}")
+        import traceback
+        ulog(f"EXCEPTION : {e}\n{traceback.format_exc()}")
 
 def get_all_screens():
     """
@@ -529,15 +668,22 @@ def find_obs_projector_screen():
 class AudioMonitor:
     BUFFER_SIZE = 70   # ~7s a ~10 updates/s
 
+    SILENCE_FIRST   = 10   # s — silence continu pour le 1er déclenchement
+    SILENCE_RETRIG  = 30   # s — silence continu pour re-déclencher (rolling depuis dernier son)
+
     def __init__(self, cfg):
         self.cfg   = cfg
         self._lock = threading.Lock()
-        self._inputs = {}
-        self._flat_since = {}      # {name: timestamp depuis lequel le son est plat}
-        self._red_since  = {}      # {name: timestamp depuis lequel db >= clip_db}
-        self._red_alert_until = {} # {name: timestamp jusqu'auquel on garde l'alerte rouge}
-        self._current_scene = None # nom scene OBS active
-        self._scenes_cfg = {}      # ref vers cfg["scenes"]
+        self._inputs     = {}
+        self._flat_since = {}   # {name: ts} son plat depuis quand
+        self._silence_on    = set()  # inputs dont l'alerte silence est actuellement active
+        self._once_alerted  = set()  # inputs ayant eu au moins une alerte (seuil → 30s)
+        # Saturation continue : db >= clip_db pendant >= 4s consecutives → alerte 10s
+        self._red_since       = {}   # {name: ts depuis lequel db >= clip_db}
+        self._red_alert_until = {}   # {name: ts jusqu'auquel on garde l'alerte rouge}
+        # Selection par scene OBS
+        self._current_scene = None   # nom scene OBS active
+        self._scenes_cfg    = {}     # ref vers cfg["scenes"]
         # {name: {peak_db, last_sound_t, buf: deque[float]}}
 
     def set_scenes_cfg(self, scenes_cfg):
@@ -548,7 +694,7 @@ class AudioMonitor:
             self._current_scene = name
 
     def _monitored_list(self):
-        """Liste des inputs surveilles : par-scene si dispo, sinon legacy global."""
+        """Inputs surveilles : par-scene si dispo, sinon legacy global."""
         cs = self._current_scene
         if cs and cs in self._scenes_cfg:
             v = self._scenes_cfg[cs].get("audio")
@@ -577,6 +723,10 @@ class AudioMonitor:
                 e["buf"].append(db)
                 if db > self.cfg["silence_db"]:
                     e["last_sound_t"] = now
+                    # Son revenu pendant une alerte active → on sort de l'état alerte
+                    # Le cooldown rolling (30s depuis dernier son) sera géré par last_sound_t
+                    if name in self._silence_on:
+                        self._silence_on.discard(name)
 
     def seed_inputs(self, names):
         """Ajoute des inputs connus avant de recevoir des events de volume."""
@@ -617,13 +767,38 @@ class AudioMonitor:
                 silence = now - e["last_sound_t"]
                 buf     = list(e["buf"])
 
-                # Silence prolonge
-                if silence >= silence_dur:
-                    out.append(
-                        f"\U0001f3a4  \u00ab {name} \u00bb  silence depuis {silence:.0f}s"
-                        f"  \u2014 micro déconnecté ou muet ?"
-                    )
-                    continue   # inutile de verifier le reste
+                # ── Silence ──────────────────────────────────────────────────
+                # Règles :
+                #  • Alerte déjà active → la maintenir (silence toujours présent)
+                #  • Pas encore alerté  → déclencher après SILENCE_FIRST (10s)
+                #  • Déjà alerté 1× (son revenu)  → re-déclencher après SILENCE_RETRIG (30s)
+                #    Le compteur 30s est rolling : reset à chaque son via last_sound_t
+                if self.cfg.get("silence_enabled", True):
+                    if name in self._silence_on:
+                        # Alerte en cours : on la maintient tant que le silence dure
+                        out.append(
+                            f"\U0001f3a4  \u00ab {name} \u00bb  silence depuis {silence:.0f}s"
+                            f"  \u2014 micro déconnecté ou muet ?"
+                        )
+                        continue
+
+                    if silence >= silence_dur:
+                        # Seuil : 10s pour le 1er déclenchement, 30s pour les suivants
+                        thresh = self.SILENCE_RETRIG if name in self._once_alerted else self.SILENCE_FIRST
+                        if silence < thresh:
+                            pass
+                        else:
+                            # Déclenchement
+                            self._silence_on.add(name)
+                            self._once_alerted.add(name)
+                            out.append(
+                                f"\U0001f3a4  \u00ab {name} \u00bb  silence depuis {silence:.0f}s"
+                                f"  \u2014 micro déconnecté ou muet ?"
+                            )
+                            continue   # inutile de verifier le reste
+                else:
+                    # silence_enabled=False : on nettoie l'état d'alerte silence
+                    self._silence_on.discard(name)
 
                 if len(buf) < 20:
                     continue   # pas assez de donnees
@@ -633,35 +808,39 @@ class AudioMonitor:
 
                 # Son trop constant (bourdonnement, micro bloqué)
                 # Doit rester plat pendant flat_dur secondes d'affilée pour déclencher
-                if mean > flat_min and std < flat_std:
-                    self._flat_since.setdefault(name, now)
-                    flat_for = now - self._flat_since[name]
-                    if flat_for >= flat_dur:
-                        out.append(
-                            f"\U0001f41d  \u00ab {name} \u00bb  son trop constant depuis {flat_for:.0f}s (variation {std:.1f} dB)"
-                            f"  \u2014 bourdonnement / micro bloqué ?"
-                        )
+                if self.cfg.get("flat_enabled", True):
+                    if mean > flat_min and std < flat_std:
+                        self._flat_since.setdefault(name, now)
+                        flat_for = now - self._flat_since[name]
+                        if flat_for >= flat_dur:
+                            out.append(
+                                f"\U0001f41d  \u00ab {name} \u00bb  son trop constant depuis {flat_for:.0f}s (variation {std:.1f} dB)"
+                                f"  \u2014 bourdonnement / micro bloqué ?"
+                            )
+                    else:
+                        self._flat_since.pop(name, None)
                 else:
                     self._flat_since.pop(name, None)
 
                 # Saturation continue : db >= clip_db pendant >= 4s consecutives
-                # -> alerte verrouillee pendant 10s (meme si la satu s'arrete avant)
-                if db >= clip_db:
-                    self._red_since.setdefault(name, now)
-                    red_for = now - self._red_since[name]
-                    if red_for >= 4.0:
-                        self._red_alert_until[name] = now + 10.0
-                else:
-                    self._red_since.pop(name, None)
+                # → alerte verrouillee pendant 10s (meme si la satu s'arrete avant)
+                if self.cfg.get("clip_enabled", True):
+                    if db >= clip_db:
+                        self._red_since.setdefault(name, now)
+                        red_for = now - self._red_since[name]
+                        if red_for >= 4.0:
+                            self._red_alert_until[name] = now + 10.0
+                    else:
+                        self._red_since.pop(name, None)
 
-                if now < self._red_alert_until.get(name, 0.0):
-                    out.append(
-                        f"\U0001f534  \u00ab {name} \u00bb  saturation continue"
-                        f"  \u2014 baisser le gain du micro"
-                    )
-                elif db >= clip_db:
-                    # Ecretage ponctuel (non chronique)
-                    out.append(f"\U0001f50a  \u00ab {name} \u00bb  écrêtage ponctuel ({db:.1f} dB)")
+                    if now < self._red_alert_until.get(name, 0.0):
+                        out.append(
+                            f"\U0001f534  \u00ab {name} \u00bb  saturation continue"
+                            f"  \u2014 baisser le gain du micro"
+                        )
+                    elif db >= clip_db:
+                        # Ecretage ponctuel (non chronique, pas encore 4s)
+                        out.append(f"\U0001f50a  \u00ab {name} \u00bb  écrêtage ponctuel ({db:.1f} dB)")
 
         return out
 
@@ -671,14 +850,27 @@ class AudioMonitor:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoMonitor:
+    VIDEO_FIRST  = 10   # s — durée continue pour 1er déclenchement (idem audio)
+    VIDEO_RETRIG = 30   # s — durée continue pour re-déclenchement (rolling depuis dernière image normale)
+
     def __init__(self, cfg, get_client):
         self.cfg         = cfg
         self._get_client = get_client
         self._lock       = threading.Lock()
         self._issues_buf = []
-        self._prev_frames  = {}
-        self._freeze_since = {}
-        self._known        = []
+        self._prev_frames = {}   # {src: (ts, img)} — dernière frame NON gelée
+        self._known       = []
+        # État par source/type — uniquement accédé par le thread _check (pas de lock nécessaire)
+        self._v_last_normal  = {}   # {src: {type: float}} — dernière fois que la condition était absente
+        self._v_cond_on      = {}   # {src: set}  — alertes actuellement actives
+        self._v_once_alerted = {}   # {src: set}  — types ayant eu au moins une alerte
+        self._headroom_buf   = []   # avertissements de cadrage (bannière jaune)
+        # Auto-switch de scène par comptage de visages
+        self._scene_switch_cfg   = {}
+        self._face_ts_buf        = []   # [(timestamp, face_count)]
+        self._scene_switch_until = 0.0  # cooldown jusqu'à ce timestamp
+        self._switch_warn_buf    = []   # avertissements bannière jaune si switch échoue
+        # Selection par scene OBS
         self._current_scene = None
         self._scenes_cfg    = {}
 
@@ -690,6 +882,7 @@ class VideoMonitor:
             self._current_scene = name
 
     def _monitored_list(self):
+        """Sources video surveillees : par-scene si dispo, sinon legacy global."""
         cs = self._current_scene
         if cs and cs in self._scenes_cfg:
             v = self._scenes_cfg[cs].get("video")
@@ -721,12 +914,16 @@ class VideoMonitor:
         except Exception:
             return
 
-        # Track la scene actuelle pour le filtrage par scene
+        # Track la scene OBS active pour le filtrage par scene
         with self._lock:
             self._current_scene = scene
-        monitor    = self._monitored_list()
-        found      = []
-        new_issues = []
+        monitor      = self._monitored_list()
+        found        = []
+        new_issues   = []
+        new_headroom = []
+        new_switch_warn = []
+        now          = time.time()
+        max_faces_this_tick = 0
 
         for item in items:
             if not item.get("sceneItemEnabled", True):
@@ -735,9 +932,6 @@ class VideoMonitor:
             if not src:
                 continue
             found.append(src)
-            # monitor=None → pas encore configuré → tout surveiller
-            # monitor=[]   → tout décoché → rien surveiller
-            # monitor=[..] → surveiller uniquement les sources cochées
             if monitor is not None and src not in monitor:
                 continue
 
@@ -747,37 +941,126 @@ class VideoMonitor:
 
             gray = img.convert("L")
             stat = ImageStat.Stat(gray)
-            br   = stat.mean[0]   # luminosite moyenne 0-255
-            std  = stat.stddev[0] # ecart-type : faible = image uniforme (noire ou blanche)
+            br   = stat.mean[0]
+            std  = stat.stddev[0]
 
-            dark_thr   = self.cfg["dark_threshold"]    # 30
-            bright_thr = self.cfg["bright_threshold"]  # 242
+            dark_thr   = self.cfg["dark_threshold"]
+            bright_thr = self.cfg["bright_threshold"]
 
-            # Image trop sombre (noire ou tres sombre + peu de variation)
-            if br < dark_thr:
+            # ── Gel (freeze) ──────────────────────────────────────────────
+            # Cas spécial : image totalement noire (luminosité < 5) = caméra éteinte.
+            # Certaines sources OBS génèrent des frames noires non identiques (bruit
+            # de compression) qui trompent le détecteur de similarité → forcer is_frozen.
+            is_black_screen = (br < 5)
+            is_frozen = is_black_screen or self._freeze_condition(src, img, br)
+            if self.cfg.get("freeze_enabled", True):
+                ok, dur = self._check_condition(src, "freeze", is_frozen, now)
+                if ok:
+                    new_issues.append(
+                        f"\U0001f9ca  \u00ab {src} \u00bb  figée depuis {dur:.0f}s"
+                        f"  \u2014 caméra plantée ?"
+                    )
+            else:
+                self._check_condition(src, "freeze", False, now)
+
+            # ── Sombre ────────────────────────────────────────────────────
+            # Ignoré si l'image est figée (black screen = gel/cam éteinte → doublon)
+            if self.cfg.get("dark_enabled", True):
+                is_dark = (br < dark_thr) and not is_frozen
+                ok, dur = self._check_condition(src, "dark", is_dark, now)
+                if ok:
+                    new_issues.append(
+                        f"\U0001f4f7  \u00ab {src} \u00bb  image trop sombre depuis {dur:.0f}s"
+                        f"  (luminosité {br:.0f}/255)  \u2014 lumières éteintes ou caméra déconnectée ?"
+                    )
+            else:
+                self._check_condition(src, "dark", False, now)
+
+            # ── Uniforme (capteur bloqué sur une couleur) ─────────────────
+            is_uniform = (std < 4 and 10 <= br < 60) and not is_frozen
+            ok, dur = self._check_condition(src, "uniform", is_uniform, now)
+            if ok:
                 new_issues.append(
-                    f"\U0001f4f7  \u00ab {src} \u00bb  image trop sombre (luminosité {br:.0f}/255)"
-                    f"  \u2014 lumières éteintes ou caméra déconnectée ?"
-                )
-            # Image trop uniforme même si pas noire : capteur bloqué sur une couleur
-            elif std < 4 and br < 60:
-                new_issues.append(
-                    f"\U0001f4f7  \u00ab {src} \u00bb  image anormalement uniforme"
+                    f"\U0001f4f7  \u00ab {src} \u00bb  image anormalement uniforme depuis {dur:.0f}s"
                     f"  \u2014 caméra bloquée ?"
                 )
-            elif br > bright_thr:
-                new_issues.append(
-                    f"\U0001f4a1  \u00ab {src} \u00bb  surexposée (luminosité {br:.0f}/255)"
-                    f"  \u2014 éclairage trop fort ?"
-                )
 
-            fi = self._freeze(src, img, br)
-            if fi:
-                new_issues.append(fi)
+            # ── Surexposée ────────────────────────────────────────────────
+            if self.cfg.get("bright_enabled", True):
+                is_bright = (br > bright_thr) and not is_frozen
+                ok, dur = self._check_condition(src, "bright", is_bright, now)
+                if ok:
+                    new_issues.append(
+                        f"\U0001f4a1  \u00ab {src} \u00bb  surexposée depuis {dur:.0f}s"
+                        f"  (luminosité {br:.0f}/255)  \u2014 éclairage trop fort ?"
+                    )
+            else:
+                self._check_condition(src, "bright", False, now)
+
+            # ── Headroom + comptage visages (Vision) ──────────────────────
+            if not is_frozen and not is_black_screen:
+                hr, face_count = self._run_vision(img)
+                max_faces_this_tick = max(max_faces_this_tick, face_count)
+                if self.cfg.get("headroom_enabled", True):
+                    headroom_thr = float(self.cfg.get("headroom_threshold", 0.35))
+                    is_bad_framing = (hr is not None) and (hr > headroom_thr)
+                    ok, dur = self._check_condition(src, "headroom", is_bad_framing, now)
+                    if ok:
+                        new_headroom.append(
+                            f"\u2195  \u00ab {src} \u00bb  cadrage à corriger depuis {dur:.0f}s"
+                            f"  (air au-dessus : {hr*100:.0f}%)"
+                        )
+                else:
+                    self._check_condition(src, "headroom", False, now)
+            else:
+                self._check_condition(src, "headroom", False, now)
+
+        # ── Auto-switch de scène selon le nombre de visages ──────────────
+        sc = self._scene_switch_cfg
+        if sc.get("enabled") and HAVE_VISION:
+            self._face_ts_buf.append((now, max_faces_this_tick))
+            trigger_s  = float(sc.get("trigger_s", 20))
+            cooldown_s = float(sc.get("cooldown_s", 30))
+            # Nettoyage du buffer : garder seulement les 60 dernières secondes
+            self._face_ts_buf = [(t, c) for t, c in self._face_ts_buf if now - t < 60]
+            if now > self._scene_switch_until:
+                window = [(t, c) for t, c in self._face_ts_buf if now - t <= trigger_s]
+                # Déclenche seulement si le buffer contient au moins trigger_s secondes de données
+                if window and self._face_ts_buf and (now - self._face_ts_buf[0][0]) >= trigger_s:
+                    counts   = [c for _, c in window]
+                    all_2p   = all(c >= 2 for c in counts)
+                    all_1p   = all(c == 1 for c in counts)
+                    scene_1p = sc.get("scene_1p", "")
+                    scene_2p = sc.get("scene_2p", "")
+                    try:
+                        if all_2p and scene_2p and scene == scene_1p:
+                            try:
+                                client.set_current_program_scene(scene_2p)
+                                print(f"[scene_switch] → {scene_2p}")
+                                self._scene_switch_until = now + cooldown_s
+                                self._face_ts_buf.clear()
+                            except Exception as e:
+                                new_switch_warn.append(
+                                    f"\u26a0\ufe0f  Passage scène 2 personnes impossible — {e}"
+                                )
+                        elif all_1p and scene_1p and scene == scene_2p:
+                            try:
+                                client.set_current_program_scene(scene_1p)
+                                print(f"[scene_switch] → {scene_1p}")
+                                self._scene_switch_until = now + cooldown_s
+                                self._face_ts_buf.clear()
+                            except Exception as e:
+                                new_switch_warn.append(
+                                    f"\u26a0\ufe0f  Passage scène 1 personne impossible — {e}"
+                                )
+                    except Exception:
+                        pass
 
         with self._lock:
-            self._issues_buf = new_issues
-            self._known      = found
+            self._issues_buf   = new_issues
+            self._headroom_buf = new_headroom + new_switch_warn
+            self._switch_warn_buf = new_switch_warn
+            self._known        = found
 
     def _capture(self, client, name):
         # PNG d'abord : lossless, pas d'artefacts JPEG qui fausseraient
@@ -795,51 +1078,132 @@ class VideoMonitor:
                 continue
         return None
 
-    def _freeze(self, src, img, brightness=128):
-        now = time.time()
+    def _check_condition(self, src, ctype, is_active, now):
+        """Logique 10s/30s rolling identique à l'audio, pour une condition vidéo.
+
+        Retourne (doit_alerter: bool, durée_s: float).
+        Appelé uniquement depuis _check() → thread unique → pas de lock nécessaire.
+
+        Règles :
+          • 1er déclenchement  : condition présente en continu >= VIDEO_FIRST (10s)
+          • Re-déclenchement   : condition présente en continu >= VIDEO_RETRIG (30s)
+            depuis la dernière image normale (rolling : chaque image normale reset le timer)
+          • Alerte déjà active : maintenue tant que la condition est présente
+        """
+        if src not in self._v_last_normal:
+            self._v_last_normal[src]  = {}
+            self._v_cond_on[src]      = set()
+            self._v_once_alerted[src] = set()
+
+        if not is_active:
+            # Condition absente → reset timer + éteindre alerte
+            self._v_last_normal[src][ctype] = now
+            self._v_cond_on[src].discard(ctype)
+            return False, 0.0
+
+        last_normal = self._v_last_normal[src].get(ctype, now)
+        duration    = now - last_normal
+
+        if ctype in self._v_cond_on[src]:
+            # Alerte déjà active → maintenir
+            return True, duration
+
+        thresh = self.VIDEO_RETRIG if ctype in self._v_once_alerted[src] else self.VIDEO_FIRST
+        if duration >= thresh:
+            self._v_cond_on[src].add(ctype)
+            self._v_once_alerted[src].add(ctype)
+            return True, duration
+
+        return False, duration
+
+    def _freeze_condition(self, src, img, brightness=128):
+        """Détecte si l'image est figée par rapport à la dernière frame non-gelée.
+        Retourne True/False — le timing est géré par _check_condition."""
         with self._lock:
             prev = self._prev_frames.get(src)
 
-        if prev:
-            _, pimg = prev
-            a   = pimg.convert("L").resize((80, 45))
-            b   = img.convert("L").resize((80, 45))
-            diff = ImageChops.difference(a, b)
-            rms  = ImageStat.Stat(diff).rms[0]
-            # max_diff : le pixel qui a le plus change (0 = aucun pixel n'a bouge)
-            max_diff = diff.getextrema()[1]
-            sim  = 1.0 - rms / 128.0
+        if prev is None:
+            with self._lock:
+                self._prev_frames[src] = (time.time(), img)
+            return False
 
-            # Pour les images sombres, le bruit capteur cause des variations
-            # de pixels même sur une scène statique → seuil max_diff plus souple
-            if brightness < self.cfg.get("dark_threshold", 30):
-                max_diff_limit = 40   # images sombres : bruit capteur important
-                sim_threshold  = 0.990
-            else:
-                max_diff_limit = 30   # images normales (marge pour artefacts résiduels)
-                sim_threshold  = self.cfg["freeze_threshold"]
+        _, pimg = prev
+        a    = pimg.convert("L").resize((80, 45))
+        b    = img.convert("L").resize((80, 45))
+        diff = ImageChops.difference(a, b)
+        rms  = ImageStat.Stat(diff).rms[0]
+        max_diff = diff.getextrema()[1]
+        sim  = 1.0 - rms / 128.0
 
-            # Vrai freeze = similarité très haute ET aucun pixel n'a vraiment bougé
-            # Scène calme naturelle = sim élevée mais quelques pixels varient (bruit, respiration)
-            is_frozen = (sim >= sim_threshold) and (max_diff < max_diff_limit)
+        if brightness < self.cfg.get("dark_threshold", 30):
+            max_diff_limit = 40    # images sombres : bruit capteur plus fort
+            sim_threshold  = 0.990
+        else:
+            max_diff_limit = 30
+            sim_threshold  = self.cfg["freeze_threshold"]
 
-            if is_frozen:
-                with self._lock:
-                    self._freeze_since.setdefault(src, now)
-                    frozen = now - self._freeze_since[src]
-                if frozen >= self.cfg["freeze_duration_s"]:
-                    return (
-                        f"\U0001f9ca  \u00ab {src} \u00bb  figée depuis {frozen:.0f}s"
-                        f"  \u2014 caméra plantée ?"
-                    )
-                return None
-            else:
-                with self._lock:
-                    self._freeze_since.pop(src, None)
+        is_frozen = (sim >= sim_threshold) and (max_diff < max_diff_limit)
 
+        if not is_frozen:
+            # Mettre à jour la référence uniquement quand l'image bouge
+            with self._lock:
+                self._prev_frames[src] = (time.time(), img)
+
+        return is_frozen
+
+    # ── Vision (cadrage + comptage visages) ──────────────────────────────────
+
+    def _run_vision(self, img):
+        """
+        Détecte les visages dans l'image PIL via Apple Vision.
+        Retourne (headroom: float|None, face_count: int).
+        headroom = espace vide au-dessus du visage principal (None si pas de visage).
+        face_count = nombre de visages détectés.
+        """
+        if not HAVE_VISION or not HAVE_APPKIT or not HAVE_QUARTZ:
+            return None, 0
+        try:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            raw = buf.read()
+            ns_data = Foundation.NSData.dataWithBytes_length_(raw, len(raw))
+            ci_image = Quartz.CIImage.imageWithData_(ns_data)
+            if ci_image is None:
+                return None, 0
+
+            handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(
+                ci_image, {}
+            )
+            request = Vision.VNDetectFaceRectanglesRequest.alloc().init()
+            handler.performRequests_error_([request], None)
+
+            results = request.results()
+            if not results or len(results) == 0:
+                return None, 0
+
+            face_count = len(results)
+            best = max(results, key=lambda f: f.boundingBox().size.width * f.boundingBox().size.height)
+            bb = best.boundingBox()
+            face_top = bb.origin.y + bb.size.height
+            headroom = max(0.0, 1.0 - face_top)
+            return headroom, face_count
+        except Exception as e:
+            print(f"[vision] {e}")
+            return None, 0
+
+    def _detect_headroom(self, img):
+        headroom, _ = self._run_vision(img)
+        return headroom
+
+    def headroom_issues(self):
+        """Retourne la liste des avertissements de cadrage + switch (pour bannière jaune)."""
         with self._lock:
-            self._prev_frames[src] = (now, img)
-        return None
+            return list(self._headroom_buf)
+
+    def set_scene_switch_cfg(self, cfg: dict):
+        """Met à jour la config auto-switch depuis le thread principal."""
+        self._scene_switch_cfg = cfg
 
     def known_sources(self):
         with self._lock:
@@ -848,222 +1212,6 @@ class VideoMonitor:
     def issues(self):
         with self._lock:
             return list(self._issues_buf)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FaceSwitcher — auto-switch de scene OBS selon le nombre de visages detectes
-# ─────────────────────────────────────────────────────────────────────────────
-
-import re as _re_face
-
-
-class FaceSwitcher:
-    """
-    Detection de visages via CIDetector (Quartz/CoreImage) sur une source OBS.
-    Bascule entre scene_1p et scene_2p selon le nombre de visages stables.
-
-    Configuration (cfg["face_switch"]) :
-      - enabled (bool)
-      - camera_source : source OBS a analyser (vide = auto, choisit une cam)
-      - scene_1p / scene_2p : noms de scenes (vide = auto-detect par nom)
-      - faces_for_1p / faces_for_2p : nb de visages = → scene correspondante (1/2)
-      - stable_s : duree consecutive avant declenchement (10s)
-      - cooldown_s : delai mini entre 2 switches (5s)
-      - poll_s : frequence d'analyse (1s)
-    """
-
-    def __init__(self, cfg, get_client, get_current_scene, set_scene_cb):
-        self.cfg = cfg                              # ref vers cfg["face_switch"]
-        self._get_client = get_client
-        self._get_current_scene = get_current_scene
-        self._set_scene = set_scene_cb              # callable(scene_name) → switch OBS
-        self._lock = threading.Lock()
-        self._face_history = deque(maxlen=30)       # (timestamp, n_faces)
-        self._last_switch_t = 0.0
-        self._last_n_faces = -1
-        self._all_scenes = []
-        self._detector = None
-        self._thread_started = False
-
-    def set_scenes(self, scene_names):
-        """Mise a jour de la liste complete des scenes OBS (pour auto-detect)."""
-        with self._lock:
-            self._all_scenes = list(scene_names)
-
-    def start(self):
-        if self._thread_started:
-            return
-        self._thread_started = True
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def _get_detector(self):
-        if self._detector is not None:
-            return self._detector
-        try:
-            opts = {Quartz.CIDetectorAccuracy: Quartz.CIDetectorAccuracyLow}
-            self._detector = Quartz.CIDetector.detectorOfType_context_options_(
-                Quartz.CIDetectorTypeFace, None, opts
-            )
-        except Exception as e:
-            print(f"[face] CIDetector init: {e}")
-            self._detector = False
-        return self._detector
-
-    def _resolve_scene_names(self):
-        """Auto-detect scene_1p / scene_2p si vides dans la config, via nom."""
-        cfg = self.cfg
-        s1 = cfg.get("scene_1p") or ""
-        s2 = cfg.get("scene_2p") or ""
-        if s1 and s2:
-            return s1, s2
-        with self._lock:
-            scenes = list(self._all_scenes)
-        if not scenes:
-            return s1, s2
-
-        # Heuristique : on cherche dans les noms des indices "1" / "solo" / "seul",
-        # "2" / "duo" / "deux", insensible a la casse.
-        re_1 = _re_face.compile(r"\b(1|1p|solo|seul|un[e]?)\b", _re_face.IGNORECASE)
-        re_2 = _re_face.compile(r"\b(2|2p|duo|deux)\b",          _re_face.IGNORECASE)
-        for n in scenes:
-            if not s1 and re_1.search(n):
-                s1 = n
-            if not s2 and re_2.search(n):
-                s2 = n
-        return s1, s2
-
-    def _resolve_camera(self):
-        """Auto-pick : source caméra explicite si fournie, sinon premier indice utile."""
-        explicit = (self.cfg.get("camera_source") or "").strip()
-        if explicit:
-            return explicit
-
-        client = self._get_client()
-        if not client:
-            return None
-        try:
-            inp_list = client.get_input_list()
-            inputs = [i for i in inp_list.inputs]
-        except Exception:
-            return None
-
-        cam_kinds = ("av_capture", "dshow_input", "screen_capture")
-        # 1) sources nommees explicitement "wide"/"master"/"studio"/"all"
-        re_wide = _re_face.compile(r"wide|master|studio|all|général|general", _re_face.IGNORECASE)
-        for i in inputs:
-            nm = i.get("inputName", "")
-            kind = i.get("inputKind", "")
-            if any(kind.startswith(k) for k in cam_kinds) and re_wide.search(nm):
-                return nm
-        # 2) sinon la 1re camera
-        for i in inputs:
-            kind = i.get("inputKind", "")
-            if any(kind.startswith(k) for k in cam_kinds):
-                return i.get("inputName")
-        return None
-
-    def _count_faces(self, client, source_name):
-        """Capture la source et compte les visages via CIDetector. Renvoie int ou None."""
-        try:
-            resp = client.get_source_screenshot(
-                name=source_name, img_format="png",
-                width=640, height=360, quality=75
-            )
-            raw_b64 = resp.image_data
-            b64 = raw_b64.split(",", 1)[1] if "," in raw_b64 else raw_b64
-            raw = base64.b64decode(b64)
-        except Exception as e:
-            print(f"[face] screenshot {source_name!r}: {e}")
-            return None
-
-        try:
-            data = Foundation.NSData.dataWithBytes_length_(raw, len(raw))
-            ci_img = Quartz.CIImage.imageWithData_(data)
-            if not ci_img:
-                return None
-            det = self._get_detector()
-            if not det:
-                return None
-            features = det.featuresInImage_(ci_img)
-            return int(features.count()) if features else 0
-        except Exception as e:
-            print(f"[face] detect: {e}")
-            return None
-
-    def _loop(self):
-        while True:
-            try:
-                self._tick()
-            except Exception as e:
-                print(f"[face] loop: {e}")
-            time.sleep(max(0.25, float(self.cfg.get("poll_s", 1.0))))
-
-    def _tick(self):
-        if not self.cfg.get("enabled", False):
-            self._face_history.clear()
-            return
-        if not (HAVE_APPKIT and HAVE_QUARTZ):
-            return
-        client = self._get_client()
-        if not client:
-            return
-
-        cam = self._resolve_camera()
-        if not cam:
-            return
-
-        n = self._count_faces(client, cam)
-        if n is None:
-            return
-
-        now = time.time()
-        self._face_history.append((now, n))
-        self._last_n_faces = n
-
-        s1, s2 = self._resolve_scene_names()
-        if not s1 or not s2:
-            return
-
-        # Cooldown apres un switch
-        if now - self._last_switch_t < float(self.cfg.get("cooldown_s", 5)):
-            return
-
-        stable_s = float(self.cfg.get("stable_s", 10))
-        # Filtre l'historique sur la fenetre stable_s
-        window = [(t, c) for (t, c) in self._face_history if (now - t) <= stable_s]
-        if not window:
-            return
-        # Toutes les mesures dans la fenetre doivent être identiques pour valider
-        first_n = window[0][1]
-        if not all(c == first_n for (_, c) in window):
-            return
-        # Au moins stable_s secondes ecoulees depuis la 1re mesure
-        if (now - window[0][0]) < stable_s:
-            return
-
-        target_1p = int(self.cfg.get("faces_for_1p", 1))
-        target_2p = int(self.cfg.get("faces_for_2p", 2))
-        cur = self._get_current_scene() or ""
-
-        target_scene = None
-        if first_n == target_1p and cur != s1:
-            target_scene = s1
-        elif first_n == target_2p and cur != s2:
-            target_scene = s2
-
-        if not target_scene:
-            return
-        # Switch seulement si la scene actuelle est s1 ou s2 (eviter de casser
-        # une scene non-related : pause, ecran titre, etc.)
-        if cur not in (s1, s2):
-            return
-
-        print(f"[face] {first_n} visage(s) stable → {target_scene!r}")
-        try:
-            self._set_scene(target_scene)
-            self._last_switch_t = now
-        except Exception as e:
-            print(f"[face] switch: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1206,7 +1354,7 @@ def _hex_to_nscolor(hex_str):
     return AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Flipped NSView + ObjC button target helper
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1215,6 +1363,927 @@ class _FlippedView(AppKit.NSView):
     def isFlipped(self):
         return True
 
+
+class _ActionTarget(Foundation.NSObject):
+    """Cible ObjC générique pour actions NSControl (steppers, boutons, etc.)."""
+    _callback = None
+    def action_(self, sender):
+        if self._callback:
+            try:
+                self._callback(sender)
+            except Exception as e:
+                print(f"[action_target] {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _FormPanel — panneau NSPanel natif avec champs texte étiquetés
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FormPanel:
+    """Panneau NSPanel natif avec champs texte étiquetés — dialogs de configuration."""
+
+    ROW_H = 28
+    SEC_H = 18
+    PAD   = 14
+    BTN_H = 30
+
+    def __init__(self, title, width=480):
+        self._title         = title
+        self._width         = width
+        self._panel         = None
+        self._fields        = {}   # key → NSTextField (éditable)
+        self._save_cb       = None
+        self._cancel_target = None
+        self._save_target   = None
+
+    def show(self, sections, on_save):
+        """
+        sections : list of (section_title: str, rows: list of (label: str, key: str, value: str))
+        on_save  : callable({key: str_value})  — appelé si l'utilisateur clique Enregistrer
+        """
+        if self._panel and self._panel.isVisible():
+            self._panel.makeKeyAndOrderFront_(None)
+            return
+
+        self._save_cb = on_save
+        self._fields  = {}
+
+        W  = self._width
+        LW = 200   # largeur colonne label
+        FW = W - LW - self.PAD * 3  # largeur champ texte
+
+        # Hauteur totale du contenu
+        n_sections = len(sections)
+        n_rows     = sum(len(rows) for _, rows in sections)
+        content_h  = (self.PAD
+                      + n_sections * (self.SEC_H + 8)
+                      + n_rows     * (self.ROW_H + 6)
+                      + self.PAD * 2 + self.BTN_H + self.PAD)
+
+        # Centrer sur l'écran principal
+        scr = AppKit.NSScreen.mainScreen().frame()
+        sx  = (scr.size.width  - W) / 2
+        sy  = (scr.size.height - content_h) / 2
+
+        rect  = Foundation.NSMakeRect(sx, sy, W, content_h)
+        style = AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable
+        panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, style, AppKit.NSBackingStoreBuffered, False
+        )
+        panel.setTitle_(self._title)
+        panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        panel.setHidesOnDeactivate_(False)
+        panel.setBackgroundColor_(_hex_to_nscolor(BG))
+
+        # Vue retournée (origine en haut à gauche)
+        doc = _FlippedView.alloc().initWithFrame_(
+            Foundation.NSMakeRect(0, 0, W, content_h)
+        )
+        panel.contentView().addSubview_(doc)
+
+        FG_COLOR    = _hex_to_nscolor("#FFFFFF")
+        ACC_COLOR   = _hex_to_nscolor(ACCENT)
+        FIELD_BG    = _hex_to_nscolor("#2C2C2C")
+
+        y = self.PAD
+
+        for sec_title, rows in sections:
+            # Titre de section
+            slbl = AppKit.NSTextField.alloc().initWithFrame_(
+                Foundation.NSMakeRect(self.PAD, y, W - self.PAD * 2, self.SEC_H)
+            )
+            slbl.setStringValue_(sec_title)
+            slbl.setEditable_(False)
+            slbl.setBezeled_(False)
+            slbl.setDrawsBackground_(False)
+            slbl.setFont_(AppKit.NSFont.boldSystemFontOfSize_(10))
+            slbl.setTextColor_(ACC_COLOR)
+            doc.addSubview_(slbl)
+            y += self.SEC_H + 6
+
+            for label, key, value in rows:
+                # Label
+                rlbl = AppKit.NSTextField.alloc().initWithFrame_(
+                    Foundation.NSMakeRect(self.PAD, y + 5, LW, self.ROW_H - 6)
+                )
+                rlbl.setStringValue_(label)
+                rlbl.setEditable_(False)
+                rlbl.setBezeled_(False)
+                rlbl.setDrawsBackground_(False)
+                rlbl.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+                rlbl.setTextColor_(FG_COLOR)
+                rlbl.setAlignment_(AppKit.NSTextAlignmentRight)
+                doc.addSubview_(rlbl)
+
+                # Champ texte éditable
+                field = AppKit.NSTextField.alloc().initWithFrame_(
+                    Foundation.NSMakeRect(LW + self.PAD * 2, y + 3, FW, self.ROW_H - 4)
+                )
+                field.setStringValue_(str(value) if value is not None else "")
+                field.setEditable_(True)
+                field.setSelectable_(True)
+                field.setBezeled_(True)
+                field.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+                field.setTextColor_(FG_COLOR)
+                field.setBackgroundColor_(FIELD_BG)
+                doc.addSubview_(field)
+                self._fields[key] = field
+                y += self.ROW_H + 6
+
+            y += 4  # espace entre sections
+
+        y += self.PAD
+
+        # Boutons Annuler / Enregistrer
+        btn_w = 120
+        cancel_btn = AppKit.NSButton.alloc().initWithFrame_(
+            Foundation.NSMakeRect(self.PAD, y, btn_w, self.BTN_H)
+        )
+        cancel_btn.setTitle_("Annuler")
+        cancel_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        doc.addSubview_(cancel_btn)
+
+        save_btn = AppKit.NSButton.alloc().initWithFrame_(
+            Foundation.NSMakeRect(W - self.PAD - btn_w, y, btn_w, self.BTN_H)
+        )
+        save_btn.setTitle_("Enregistrer")
+        save_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        save_btn.setKeyEquivalent_("\r")
+        doc.addSubview_(save_btn)
+
+        # Cibles ObjC pour les boutons (pattern déjà utilisé dans _SnoozeTarget)
+        ct = _SnoozeTarget.alloc().init()
+        ct._callback = lambda: panel.orderOut_(None)
+        cancel_btn.setTarget_(ct)
+        cancel_btn.setAction_("clicked:")
+        self._cancel_target = ct
+
+        st = _SnoozeTarget.alloc().init()
+        st._callback = self._on_save
+        save_btn.setTarget_(st)
+        save_btn.setAction_("clicked:")
+        self._save_target = st
+
+        self._panel = panel
+        panel.makeKeyAndOrderFront_(None)
+
+    def _on_save(self):
+        values = {key: f.stringValue() for key, f in self._fields.items()}
+        if self._panel:
+            self._panel.orderOut_(None)
+        if self._save_cb:
+            try:
+                self._save_cb(values)
+            except Exception as e:
+                print(f"[_FormPanel] save error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebKit — chargement du framework pour WKWebView
+# ─────────────────────────────────────────────────────────────────────────────
+
+HAVE_WEBKIT        = False
+_WKWebView         = None
+_WKWebViewConfig   = None
+_WKUserCC          = None
+
+if HAVE_APPKIT:
+    try:
+        _wk_bundle = Foundation.NSBundle.bundleWithPath_(
+            "/System/Library/Frameworks/WebKit.framework"
+        )
+        if _wk_bundle and not _wk_bundle.isLoaded():
+            _wk_bundle.load()
+        import objc as _objc_wk
+        _WKWebView       = _objc_wk.lookUpClass("WKWebView")
+        _WKWebViewConfig = _objc_wk.lookUpClass("WKWebViewConfiguration")
+        _WKUserCC        = _objc_wk.lookUpClass("WKUserContentController")
+        HAVE_WEBKIT = True
+    except Exception as _wk_e:
+        print(f"[webkit] {_wk_e}")
+
+
+class _WKMsgHandler(Foundation.NSObject):
+    """Reçoit les messages JS → Python via window.webkit.messageHandlers.obsMonitor."""
+    _callback = None
+
+    def userContentController_didReceiveScriptMessage_(self, controller, message):
+        if not self._callback:
+            return
+        try:
+            body = message.body()
+            s = body.UTF8String().decode("utf-8") if hasattr(body, "UTF8String") else str(body)
+            import json as _j
+            self._callback(_j.loads(s))
+        except Exception as e:
+            print(f"[wk_handler] {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _WebSettingsPanel — panneau HTML/CSS via WKWebView
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _WebSettingsPanel:
+    DAYS_FR  = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+    DAY_KEYS = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
+
+    def __init__(self, title):
+        self._title   = title
+        self._panel   = None
+        self._webview = None
+        self._handler = None
+        self._on_save = None
+        self._fallback = None
+
+    def show(self, sections, on_save):
+        if self._panel and self._panel.isVisible():
+            self._panel.makeKeyAndOrderFront_(None)
+            return
+        self._on_save = on_save
+        if not HAVE_WEBKIT:
+            if not self._fallback:
+                self._fallback = _SettingsPanel(self._title)
+            self._fallback.show(sections, on_save)
+            return
+        html = self._gen_html(sections)
+        self._build(html)
+
+    def _on_msg(self, data):
+        action = data.get("action") if isinstance(data, dict) else None
+        if action == "cancel":
+            if self._panel:
+                self._panel.orderOut_(None)
+        elif action == "save":
+            vals = data.get("values", {})
+            if self._on_save:
+                try:
+                    self._on_save(vals)
+                except Exception as e:
+                    print(f"[web_panel] save: {e}")
+            if self._panel:
+                self._panel.orderOut_(None)
+
+    def _build(self, html):
+        self._handler = _WKMsgHandler.alloc().init()
+        self._handler._callback = self._on_msg
+
+        cfg = _WKWebViewConfig.alloc().init()
+        ucc = _WKUserCC.alloc().init()
+        ucc.addScriptMessageHandler_name_(self._handler, "obsMonitor")
+        cfg.setUserContentController_(ucc)
+
+        scr = AppKit.NSScreen.mainScreen().visibleFrame()
+        W   = min(640, scr.size.width  * 0.85)
+        H   = min(720, scr.size.height * 0.90)
+        px  = scr.origin.x + (scr.size.width  - W) / 2
+        py  = scr.origin.y + (scr.size.height - H) / 2
+
+        self._webview = _WKWebView.alloc().initWithFrame_configuration_(
+            Foundation.NSMakeRect(0, 0, W, H), cfg
+        )
+        self._webview.loadHTMLString_baseURL_(html, None)
+
+        style = (AppKit.NSWindowStyleMaskTitled |
+                 AppKit.NSWindowStyleMaskClosable |
+                 AppKit.NSWindowStyleMaskResizable)
+        self._panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            Foundation.NSMakeRect(px, py, W, H),
+            style, AppKit.NSBackingStoreBuffered, False,
+        )
+        self._panel.setTitle_("⚙️  Configuration OBS Monitor")
+        self._panel.setLevel_(AppKit.NSFloatingWindowLevel + 3)
+        self._panel.setHidesOnDeactivate_(False)
+        self._panel.setContentView_(self._webview)
+        self._panel.makeKeyAndOrderFront_(None)
+
+    # ── HTML generator ────────────────────────────────────────────────────────
+
+    def _gen_html(self, sections):
+        css = f"""
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+:root {{
+  --bg:      {BG};
+  --bg2:     {BG2};
+  --bg3:     {BG3};
+  --surface: #1e1e30;
+  --surf2:   #252540;
+  --border:  rgba(255,255,255,0.08);
+  --accent:  {ACCENT};
+  --green:   {GREEN};
+  --red:     {RED};
+  --yellow:  {YELLOW};
+  --fg:      {FG};
+  --fg2:     #a6adc8;
+  --fg3:     {FG2};
+  --r:       10px;
+  --rsm:     6px;
+}}
+html, body {{ height: 100%; display: flex; flex-direction: column; }}
+body {{
+  font-family: -apple-system, 'SF Pro Text', sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.4;
+}}
+.content {{
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+.content::-webkit-scrollbar {{ width: 8px; }}
+.content::-webkit-scrollbar-track {{ background: rgba(255,255,255,0.04); border-radius: 4px; }}
+.content::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,0.25); border-radius: 4px; }}
+.content::-webkit-scrollbar-thumb:hover {{ background: rgba(255,255,255,0.4); }}
+.section {{
+  background: var(--bg2);
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+}}
+.section-header {{
+  padding: 8px 14px 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  background: rgba(122,162,247,0.06);
+}}
+.section-body {{ padding: 2px 0; }}
+.row {{
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}}
+.row:last-child {{ border-bottom: none; }}
+.row:hover {{ background: rgba(255,255,255,0.02); }}
+.row-label {{ flex: 1; color: var(--fg); font-size: 13px; }}
+.row-label small {{ display: block; color: var(--fg3); font-size: 11px; margin-top: 1px; }}
+/* Toggle */
+.toggle-wrap {{ display: flex; align-items: center; gap: 10px; width: 100%; cursor: pointer; }}
+.toggle {{ position: relative; width: 36px; height: 20px; flex-shrink: 0; }}
+.toggle input {{ display: none; }}
+.toggle-track {{
+  position: absolute; inset: 0;
+  border-radius: 10px;
+  background: var(--fg3);
+  transition: background 0.2s;
+  cursor: pointer;
+}}
+.toggle input:checked ~ .toggle-track {{ background: var(--accent); }}
+.toggle-thumb {{
+  position: absolute; top: 3px; left: 3px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.2s;
+  pointer-events: none;
+}}
+.toggle input:checked ~ .toggle-track .toggle-thumb {{ transform: translateX(16px); }}
+/* Stepper */
+.stepper {{ display: flex; align-items: center; gap: 5px; flex-shrink: 0; }}
+.stepper-val {{
+  width: 52px; text-align: center;
+  background: var(--surf2);
+  border: 1px solid var(--border);
+  border-radius: var(--rsm);
+  color: var(--fg);
+  font-size: 13px; font-weight: 600;
+  padding: 4px 6px; outline: none;
+}}
+.stepper-val:focus {{ border-color: var(--accent); }}
+.stepper-btns {{ display: flex; flex-direction: column; gap: 2px; }}
+.stepper-btn {{
+  width: 20px; height: 13px;
+  background: var(--surf2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg2); font-size: 8px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  user-select: none; transition: background 0.1s;
+}}
+.stepper-btn:hover {{ background: var(--accent); color: white; border-color: var(--accent); }}
+.stepper-unit {{ color: var(--fg3); font-size: 12px; min-width: 44px; }}
+/* Days */
+.days-wrap {{ display: flex; gap: 4px; flex: 1; }}
+.day-btn {{
+  flex: 1; padding: 5px 2px;
+  border-radius: var(--rsm);
+  border: 1px solid var(--border);
+  background: var(--surf2);
+  color: var(--fg3); font-size: 10.5px; font-weight: 700;
+  text-align: center; cursor: pointer;
+  transition: all 0.15s; user-select: none;
+}}
+.day-btn.active {{ background: var(--accent); border-color: var(--accent); color: white; }}
+.day-btn:hover:not(.active) {{ border-color: var(--accent); color: var(--fg); }}
+/* Time / Text */
+.time-field {{
+  width: 68px; text-align: center;
+  background: var(--surf2); border: 1px solid var(--border);
+  border-radius: var(--rsm); color: var(--fg);
+  font-size: 13px; font-weight: 600;
+  padding: 4px 6px; outline: none;
+}}
+.time-field:focus {{ border-color: var(--accent); }}
+.text-field {{
+  flex: 1; background: var(--surf2);
+  border: 1px solid var(--border);
+  border-radius: var(--rsm); color: var(--fg);
+  font-size: 12px; padding: 5px 10px; outline: none;
+  font-family: 'SF Mono', monospace;
+}}
+.text-field:focus {{ border-color: var(--accent); }}
+.text-field::placeholder {{ color: var(--fg3); }}
+/* Badges */
+.badge-off {{
+  font-size: 10px; padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(247,118,142,0.15); color: var(--red);
+  font-weight: 600; letter-spacing: 0.03em; flex-shrink: 0;
+}}
+.badge-on {{
+  font-size: 10px; padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(158,206,106,0.15); color: var(--green);
+  font-weight: 600; letter-spacing: 0.03em; flex-shrink: 0;
+}}
+/* Footer */
+.footer {{
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}}
+.btn {{
+  padding: 7px 20px; border-radius: var(--rsm);
+  font-size: 13px; font-weight: 500;
+  cursor: pointer; border: 1px solid var(--border);
+  transition: all 0.15s;
+}}
+.btn-cancel {{ background: transparent; color: var(--fg2); }}
+.btn-cancel:hover {{ background: var(--surf2); color: var(--fg); }}
+.btn-save {{ background: var(--accent); color: white; border-color: var(--accent); }}
+.btn-save:hover {{ opacity: 0.85; }}
+"""
+        js = """
+function toggleBadge(key, checked) {
+  const b = document.getElementById('badge-' + key);
+  if (!b) return;
+  b.className = checked ? 'badge-on' : 'badge-off';
+  b.textContent = checked ? 'ACTIF' : 'INACTIF';
+}
+function step(btn, delta) {
+  const inp = btn.closest('.stepper').querySelector('.stepper-val');
+  inp.value = (parseInt(inp.value) || 0) + delta;
+}
+document.querySelectorAll('.day-btn').forEach(b => {
+  b.addEventListener('click', () => b.classList.toggle('active'));
+});
+document.querySelectorAll('input[data-type="toggle"]').forEach(cb => {
+  cb.addEventListener('change', () => toggleBadge(cb.dataset.key, cb.checked));
+});
+function getVals() {
+  const v = {};
+  document.querySelectorAll('input[data-type="toggle"]').forEach(el => {
+    v[el.dataset.key] = el.checked;
+  });
+  document.querySelectorAll('input[data-type="stepper"]').forEach(el => {
+    v[el.dataset.key] = parseInt(el.value) || 0;
+  });
+  document.querySelectorAll('input[data-type="time"]').forEach(el => {
+    v[el.dataset.key] = el.value;
+  });
+  document.querySelectorAll('input[data-type="text"]').forEach(el => {
+    v[el.dataset.key] = el.value;
+  });
+  document.querySelectorAll('.days-wrap[data-type="days"]').forEach(wrap => {
+    const active = [...wrap.querySelectorAll('.day-btn.active')].map(b => b.dataset.day);
+    v[wrap.dataset.key] = active.join(',') || 'lun,mar,mer,jeu,ven,sam,dim';
+  });
+  return v;
+}
+function save() {
+  window.webkit.messageHandlers.obsMonitor.postMessage(
+    JSON.stringify({action:'save', values:getVals()})
+  );
+}
+function cancel() {
+  window.webkit.messageHandlers.obsMonitor.postMessage(JSON.stringify({action:'cancel'}));
+}
+"""
+        secs_html = []
+        for sec_title, items in sections:
+            rows = []
+            for item in items:
+                label, key, ftype = item[0], item[1], item[2]
+                val   = item[3] if len(item) > 3 else None
+                extra = item[4:] if len(item) > 4 else ()
+
+                if ftype == "toggle":
+                    ch  = "checked" if val else ""
+                    bon = "badge-on" if val else "badge-off"
+                    btx = "ACTIF"   if val else "INACTIF"
+                    rows.append(f"""<div class="row toggle-row">
+  <label class="toggle-wrap">
+    <div class="toggle">
+      <input type="checkbox" data-key="{key}" data-type="toggle" {ch}>
+      <div class="toggle-track"><div class="toggle-thumb"></div></div>
+    </div>
+    <span class="row-label">{label}</span>
+    <span class="{bon}" id="badge-{key}">{btx}</span>
+  </label>
+</div>""")
+
+                elif ftype == "stepper":
+                    mn, mx, st, unit = extra[0], extra[1], extra[2], extra[3]
+                    iv = int(round(float(val))) if val is not None else 0
+                    rows.append(f"""<div class="row">
+  <span class="row-label">{label}</span>
+  <div class="stepper">
+    <input class="stepper-val" data-key="{key}" data-type="stepper" value="{iv}" type="text">
+    <div class="stepper-btns">
+      <div class="stepper-btn" onclick="step(this,{st})">▲</div>
+      <div class="stepper-btn" onclick="step(this,{-st})">▼</div>
+    </div>
+    <span class="stepper-unit">{unit}</span>
+  </div>
+</div>""")
+
+                elif ftype == "days":
+                    active = set(d.strip().lower() for d in str(val or "").split(","))
+                    if not active or not any(d in self.DAY_KEYS for d in active):
+                        active = set(self.DAY_KEYS)
+                    btns = "".join(
+                        f'<div class="day-btn{"  active" if dk in active else ""}" data-day="{dk}">{dn}</div>'
+                        for dk, dn in zip(self.DAY_KEYS, self.DAYS_FR)
+                    )
+                    rows.append(f"""<div class="row">
+  <span class="row-label" style="flex:0 0 90px;min-width:90px">{label}</span>
+  <div class="days-wrap" data-key="{key}" data-type="days">{btns}</div>
+</div>""")
+
+                elif ftype == "time":
+                    sv = str(val) if val else "00:00"
+                    rows.append(f"""<div class="row">
+  <span class="row-label">{label}</span>
+  <input class="time-field" data-key="{key}" data-type="time" value="{sv}">
+</div>""")
+
+                elif ftype == "text":
+                    sv = str(val) if val else ""
+                    sv = sv.replace('"', '&quot;')
+                    rows.append(f"""<div class="row">
+  <span class="row-label">{label}</span>
+  <input class="text-field" data-key="{key}" data-type="text" value="{sv}" placeholder="">
+</div>""")
+
+            secs_html.append(f"""<div class="section">
+  <div class="section-header">{sec_title}</div>
+  <div class="section-body">
+    {"".join(rows)}
+  </div>
+</div>""")
+
+        return f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="UTF-8">
+<style>{css}</style></head>
+<body>
+<div class="content">{"".join(secs_html)}</div>
+<div class="footer">
+  <button class="btn btn-cancel" onclick="cancel()">Annuler</button>
+  <button class="btn btn-save" onclick="save()">Enregistrer ✓</button>
+</div>
+<script>{js}</script>
+</body></html>"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _SettingsPanel — panneau de configuration natif scrollable (fallback)
+# Contrôles adaptés : toggles, steppers entiers, sélecteur de jours, heures
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _SettingsPanel:
+    """
+    Panneau de configuration natif avec :
+    - toggle  : checkbox ON/OFF
+    - stepper : entier avec boutons +/− et unité
+    - days    : 7 boutons jour cochables
+    - time    : champ HH:MM
+    - text    : champ texte libre
+    Scrollable pour les longues listes de paramètres.
+    """
+    W      = 580
+    PAD    = 20
+    ROW_H  = 36
+    DAYS_H = 48
+    SEC_H  = 26
+    GAP    = 10
+    BTN_H  = 32
+
+    DAYS_FR   = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+    _DAY_MAP  = {"lun":0,"mar":1,"mer":2,"jeu":3,"ven":4,"sam":5,"dim":6}
+    _DAY_KEYS = ["lun","mar","mer","jeu","ven","sam","dim"]
+
+    def __init__(self, title):
+        self._title   = title
+        self._panel   = None
+        self._ctrls   = {}
+        self._targets = []
+        self._on_save = None
+
+    def _parse_days(self, days_str):
+        s = set()
+        for d in str(days_str).split(","):
+            d = d.strip().lower()
+            if d in self._DAY_MAP:
+                s.add(self._DAY_MAP[d])
+        return s if s else set(range(7))
+
+    def _encode_days(self, days_set):
+        return ",".join(self._DAY_KEYS[i] for i in range(7) if i in days_set) or "lun,mar,mer,jeu,ven,sam,dim"
+
+    def show(self, sections, on_save):
+        """
+        sections : list of (section_title, items)
+        item : (label, key, field_type, current_value, *extra)
+          field_type "toggle"  : bool
+          field_type "stepper" : extra = (min, max, step, unit_str)
+          field_type "days"    : str "lun,mar,..."
+          field_type "time"    : str "HH:MM"
+          field_type "text"    : str
+        """
+        if self._panel and self._panel.isVisible():
+            self._panel.makeKeyAndOrderFront_(None)
+            return
+
+        self._ctrls   = {}
+        self._targets = []
+        self._on_save = on_save
+
+        W = self.W
+
+        # Hauteur totale du contenu
+        content_h = self.PAD
+        for _, items in sections:
+            content_h += self.SEC_H + 6
+            for item in items:
+                content_h += self.DAYS_H if item[2] == "days" else self.ROW_H
+            content_h += self.GAP
+        content_h += self.PAD
+
+        scr      = AppKit.NSScreen.mainScreen().visibleFrame()
+        panel_h  = min(content_h + 60, scr.size.height * 0.90)
+        px       = scr.origin.x + (scr.size.width  - W)       / 2
+        py       = scr.origin.y + (scr.size.height - panel_h) / 2
+
+        style = (AppKit.NSWindowStyleMaskTitled |
+                 AppKit.NSWindowStyleMaskClosable |
+                 AppKit.NSWindowStyleMaskResizable)
+        self._panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            Foundation.NSMakeRect(px, py, W, panel_h),
+            style, AppKit.NSBackingStoreBuffered, False,
+        )
+        self._panel.setTitle_(self._title)
+        self._panel.setLevel_(AppKit.NSFloatingWindowLevel + 3)
+        self._panel.setHidesOnDeactivate_(False)
+
+        cv       = self._panel.contentView()
+        BTN_AREA = 52
+        scroll_h = panel_h - BTN_AREA
+
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(
+            Foundation.NSMakeRect(0, BTN_AREA, W, scroll_h)
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setHasHorizontalScroller_(False)
+        scroll.setAutohidesScrollers_(True)
+        scroll.setBorderType_(AppKit.NSNoBorder)
+
+        inner_h = max(content_h, scroll_h)
+        inner   = _FlippedView.alloc().initWithFrame_(Foundation.NSMakeRect(0, 0, W, inner_h))
+
+        y = self.PAD
+
+        for sec_title, items in sections:
+            # ── En-tête de section ────────────────────────────────────
+            sh = AppKit.NSTextField.alloc().initWithFrame_(
+                Foundation.NSMakeRect(self.PAD, y, W - 2*self.PAD, self.SEC_H)
+            )
+            sh.setStringValue_(sec_title)
+            sh.setTextColor_(_hex_to_nscolor(ACCENT))
+            sh.setFont_(AppKit.NSFont.boldSystemFontOfSize_(11))
+            sh.setBezeled_(False); sh.setEditable_(False); sh.setSelectable_(False)
+            sh.setDrawsBackground_(False)
+            inner.addSubview_(sh)
+            y += self.SEC_H + 4
+
+            for item in items:
+                label, key, ftype = item[0], item[1], item[2]
+                val   = item[3] if len(item) > 3 else None
+                extra = item[4:] if len(item) > 4 else ()
+
+                if ftype == "toggle":
+                    cb = AppKit.NSButton.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(self.PAD, y + 4, W - 2*self.PAD, self.ROW_H - 6)
+                    )
+                    cb.setButtonType_(AppKit.NSButtonTypeSwitch)
+                    cb.setTitle_("  " + label)
+                    cb.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+                    cb.setState_(AppKit.NSOnState if val else AppKit.NSOffState)
+                    inner.addSubview_(cb)
+                    self._ctrls[key] = ("toggle", cb)
+                    y += self.ROW_H
+
+                elif ftype == "stepper":
+                    s_min, s_max, s_step, unit = extra[0], extra[1], extra[2], extra[3]
+                    ival    = int(round(float(val))) if val is not None else 0
+                    lbl_w   = W - 2*self.PAD - 148
+                    row_cy  = y + (self.ROW_H - 22) // 2
+
+                    ll = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(self.PAD, y, lbl_w, self.ROW_H)
+                    )
+                    ll.setStringValue_(label)
+                    ll.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+                    ll.setBezeled_(False); ll.setEditable_(False); ll.setSelectable_(False)
+                    ll.setDrawsBackground_(False)
+                    ll.setTextColor_(AppKit.NSColor.labelColor())
+                    ll.cell().setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
+                    inner.addSubview_(ll)
+
+                    val_x = self.PAD + lbl_w + 8
+                    tf = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(val_x, row_cy, 55, 22)
+                    )
+                    tf.setStringValue_(str(ival))
+                    tf.setFont_(AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(
+                        13, AppKit.NSFontWeightMedium))
+                    tf.setAlignment_(AppKit.NSTextAlignmentCenter)
+                    inner.addSubview_(tf)
+
+                    sp = AppKit.NSStepper.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(val_x + 58, row_cy, 19, 22)
+                    )
+                    sp.setMinValue_(s_min); sp.setMaxValue_(s_max)
+                    sp.setIncrement_(s_step); sp.setIntValue_(ival)
+                    sp.setValueWraps_(False)
+                    tgt = _ActionTarget.alloc().init()
+                    _tf = tf
+                    tgt._callback = lambda s, f=_tf: f.setStringValue_(str(int(s.intValue())))
+                    self._targets.append(tgt)
+                    sp.setTarget_(tgt); sp.setAction_("action:")
+                    inner.addSubview_(sp)
+
+                    ul = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(val_x + 80, y, W - val_x - 80 - self.PAD, self.ROW_H)
+                    )
+                    ul.setStringValue_(unit)
+                    ul.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+                    ul.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+                    ul.setBezeled_(False); ul.setEditable_(False); ul.setSelectable_(False)
+                    ul.setDrawsBackground_(False)
+                    inner.addSubview_(ul)
+
+                    self._ctrls[key] = ("stepper", tf, sp)
+                    y += self.ROW_H
+
+                elif ftype == "days":
+                    days_set = self._parse_days(val)
+                    avail_w  = W - 2*self.PAD
+                    btn_w    = (avail_w - 6*6) / 7
+                    day_btns = []
+                    for di, dname in enumerate(self.DAYS_FR):
+                        bx = self.PAD + di * (btn_w + 6)
+                        db = AppKit.NSButton.alloc().initWithFrame_(
+                            Foundation.NSMakeRect(bx, y + 6, btn_w, 34)
+                        )
+                        db.setButtonType_(AppKit.NSButtonTypeOnOff)
+                        db.setBezelStyle_(AppKit.NSBezelStyleRounded)
+                        db.setTitle_(dname)
+                        db.setFont_(AppKit.NSFont.boldSystemFontOfSize_(12))
+                        db.setState_(AppKit.NSOnState if di in days_set else AppKit.NSOffState)
+                        inner.addSubview_(db)
+                        day_btns.append(db)
+                    self._ctrls[key] = ("days", day_btns)
+                    y += self.DAYS_H
+
+                elif ftype == "time":
+                    lbl_w  = W - 2*self.PAD - 82
+                    row_cy = y + (self.ROW_H - 22) // 2
+                    ll = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(self.PAD, y, lbl_w, self.ROW_H)
+                    )
+                    ll.setStringValue_(label)
+                    ll.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+                    ll.setBezeled_(False); ll.setEditable_(False); ll.setSelectable_(False)
+                    ll.setDrawsBackground_(False)
+                    ll.setTextColor_(AppKit.NSColor.labelColor())
+                    inner.addSubview_(ll)
+                    tf = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(self.PAD + lbl_w + 8, row_cy, 74, 22)
+                    )
+                    tf.setStringValue_(str(val) if val else "00:00")
+                    tf.setFont_(AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(
+                        13, AppKit.NSFontWeightMedium))
+                    tf.setAlignment_(AppKit.NSTextAlignmentCenter)
+                    tf.cell().setPlaceholderString_("HH:MM")
+                    inner.addSubview_(tf)
+                    self._ctrls[key] = ("time", tf)
+                    y += self.ROW_H
+
+                elif ftype == "text":
+                    lbl_w  = 190
+                    row_cy = y + (self.ROW_H - 22) // 2
+                    ll = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(self.PAD, y, lbl_w, self.ROW_H)
+                    )
+                    ll.setStringValue_(label)
+                    ll.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+                    ll.setBezeled_(False); ll.setEditable_(False); ll.setSelectable_(False)
+                    ll.setDrawsBackground_(False)
+                    ll.setTextColor_(AppKit.NSColor.labelColor())
+                    inner.addSubview_(ll)
+                    tf = AppKit.NSTextField.alloc().initWithFrame_(
+                        Foundation.NSMakeRect(self.PAD + lbl_w + 8, row_cy,
+                                             W - 2*self.PAD - lbl_w - 8, 22)
+                    )
+                    tf.setStringValue_(str(val) if val else "")
+                    tf.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+                    inner.addSubview_(tf)
+                    self._ctrls[key] = ("text", tf)
+                    y += self.ROW_H
+
+            y += self.GAP
+
+        y += self.PAD
+        inner.setFrame_(Foundation.NSMakeRect(0, 0, W, max(y, scroll_h)))
+        scroll.setDocumentView_(inner)
+        cv.addSubview_(scroll)
+
+        # ── Boutons fixes en bas ───────────────────────────────────────
+        cancel = AppKit.NSButton.alloc().initWithFrame_(
+            Foundation.NSMakeRect(self.PAD, 10, 110, self.BTN_H)
+        )
+        cancel.setTitle_("Annuler")
+        cancel.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        ct = _ActionTarget.alloc().init()
+        ct._callback = lambda _: self._panel.orderOut_(None)
+        self._targets.append(ct)
+        cancel.setTarget_(ct); cancel.setAction_("action:")
+        cv.addSubview_(cancel)
+
+        save = AppKit.NSButton.alloc().initWithFrame_(
+            Foundation.NSMakeRect(W - self.PAD - 130, 10, 130, self.BTN_H)
+        )
+        save.setTitle_("Enregistrer ✓")
+        save.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        save.setKeyEquivalent_("\r")
+        st = _ActionTarget.alloc().init()
+        st._callback = lambda _: self._do_save()
+        self._targets.append(st)
+        save.setTarget_(st); save.setAction_("action:")
+        cv.addSubview_(save)
+
+        self._panel.makeKeyAndOrderFront_(None)
+        self._panel.orderFrontRegardless()
+
+    def _do_save(self):
+        vals = {}
+        for key, info in self._ctrls.items():
+            t = info[0]
+            if t == "toggle":
+                vals[key] = (info[1].state() == AppKit.NSOnState)
+            elif t == "stepper":
+                try:
+                    vals[key] = int(info[1].stringValue())
+                except Exception:
+                    vals[key] = int(info[2].intValue())
+            elif t == "days":
+                active = {di for di, b in enumerate(info[1]) if b.state() == AppKit.NSOnState}
+                vals[key] = self._encode_days(active)
+            elif t == "time":
+                vals[key] = info[1].stringValue().strip() or "00:00"
+            elif t == "text":
+                vals[key] = info[1].stringValue().strip()
+        if self._on_save:
+            self._on_save(vals)
+        if self._panel:
+            self._panel.orderOut_(None)
+
+    def close(self):
+        if self._panel:
+            self._panel.orderOut_(None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1227,14 +2296,13 @@ class NativePanel:
     so it can appear above OBS Projector (Metal rendering).
     Contains: status, source selection checkboxes, monitoring info, issues list.
     """
-    W = 340
-    PANEL_H = 680
+    W = 300
+    PANEL_H = 650
 
     def __init__(self):
         self._panel = None
         self._text_view = None
         self._status_field = None
-        self._scene_field  = None  # affichage scene OBS courante
         self._update_field = None
         self._info_field = None
         self._lock = threading.Lock()
@@ -1246,7 +2314,6 @@ class NativePanel:
         self._save_callback = None
         self._last_audio_names = []
         self._last_video_names = []
-        self._last_scene = None
         self._header_end_y = 0  # Y position after fixed header
 
     def build(self):
@@ -1342,25 +2409,18 @@ class NativePanel:
 
     def _build_content(self, doc, cw):
         """Build fixed header elements. Dynamic content is built by _rebuild_dynamic."""
-        y = 14
+        y = 8
 
-        # ── Statut connexion (dot + libelle bold) ──
+        # ── Status ──
         self._status_field = self._make_label(
-            doc, 16, y, cw - 32, 22,
-            "● Connexion à OBS…", ORANGE, 14, bold=True
-        )
-        y += 26
-
-        # ── Scene courante (chip discret) ──
-        self._scene_field = self._make_label(
-            doc, 16, y, cw - 32, 18,
-            "Scène : —", FG2, 11, bold=False
+            doc, 12, y, cw - 24, 18,
+            "Connexion à OBS…", ORANGE, 12, bold=False
         )
         y += 24
 
-        # ── Update notification (masque par defaut) ──
+        # ── Update notification (hidden) ──
         self._update_field = self._make_label(
-            doc, 16, y, cw - 32, 16,
+            doc, 12, y, cw - 24, 16,
             "", GREEN, 11, bold=True
         )
         self._update_field.setHidden_(True)
@@ -1372,9 +2432,9 @@ class NativePanel:
         self._header_end_y = y
 
         # Build initial dynamic content (placeholders)
-        self._rebuild_dynamic([], [], None, None)
+        self._rebuild_dynamic([], [], None)
 
-    def _rebuild_dynamic(self, audio_names, video_names, cfg, scene_name):
+    def _rebuild_dynamic(self, audio_names, video_names, cfg):
         """Rebuild all content below the fixed header (sources, info, alerts)."""
         doc = self._doc
         cw = self._doc_width
@@ -1399,27 +2459,19 @@ class NativePanel:
         self._audio_cbs = []
         self._video_cbs = []
 
-        y = self._header_end_y + 4
+        y = self._header_end_y
 
         # ── SOURCES AUDIO ──
         self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "SOURCES AUDIO", ACCENT, 11, bold=True)
+            self._make_label(doc, 12, y, cw - 24, 16, "SOURCES AUDIO", ACCENT, 10, bold=True)
         )
-        y += 24
+        y += 20
 
-        # Selection par scene : prioritaire sur le legacy global
-        monitored_audio = None  # None = tout coche, set() = rien coche
+        monitored_audio = None  # None = tout coché, set() = rien coché
         monitored_video = None
         if cfg:
-            raw_a = None
-            raw_v = None
-            if scene_name and scene_name in cfg.get("scenes", {}):
-                raw_a = cfg["scenes"][scene_name].get("audio")
-                raw_v = cfg["scenes"][scene_name].get("video")
-            if raw_a is None:
-                raw_a = cfg["checks"]["audio"].get("monitor_inputs", None)
-            if raw_v is None:
-                raw_v = cfg["checks"]["video"].get("monitor_sources", None)
+            raw_a = cfg["checks"]["audio"].get("monitor_inputs", None)
+            raw_v = cfg["checks"]["video"].get("monitor_sources", None)
             monitored_audio = set(raw_a) if raw_a is not None else None
             monitored_video = set(raw_v) if raw_v is not None else None
 
@@ -1429,19 +2481,19 @@ class NativePanel:
                 cb = self._make_checkbox(name, checked, y, cw)
                 doc.addSubview_(cb)
                 self._audio_cbs.append((name, cb))
-                y += 22
+                y += 20
         else:
-            lbl = self._make_label(doc, 24, y, cw - 40, 18,
-                                   "En attente de connexion…", FG2, 11, bold=False)
+            lbl = self._make_label(doc, 20, y, cw - 32, 16,
+                                   "En attente de connexion…", FG2, 10, bold=False)
             self._dynamic_views.append(lbl)
-            y += 22
-        y += 10
+            y += 20
+        y += 6
 
         # ── SOURCES VIDÉO ──
         self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "SOURCES VIDÉO", ACCENT, 11, bold=True)
+            self._make_label(doc, 12, y, cw - 24, 16, "SOURCES VIDÉO", ACCENT, 10, bold=True)
         )
-        y += 24
+        y += 20
 
         if video_names:
             for name in video_names:
@@ -1449,69 +2501,67 @@ class NativePanel:
                 cb = self._make_checkbox(name, checked, y, cw)
                 doc.addSubview_(cb)
                 self._video_cbs.append((name, cb))
-                y += 22
+                y += 20
         else:
-            lbl = self._make_label(doc, 24, y, cw - 40, 18,
-                                   "En attente de connexion…", FG2, 11, bold=False)
+            lbl = self._make_label(doc, 20, y, cw - 32, 16,
+                                   "En attente de connexion…", FG2, 10, bold=False)
             self._dynamic_views.append(lbl)
-            y += 22
-        y += 6
+            y += 20
+        y += 4
 
         # ── Save hint ──
         self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 14,
-                             "✓ Enregistrement automatique par scène", FG2, 10, bold=False)
+            self._make_label(doc, 12, y, cw - 24, 14,
+                             "✓ La sélection se met à jour automatiquement", FG2, 9, bold=False)
         )
-        y += 22
+        y += 20
 
         # ── Separator ──
         y = self._add_separator_dyn(doc, y, cw)
-        y += 4
 
         # ── CE QUI EST SURVEILLÉ ──
         self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "CE QUI EST SURVEILLÉ", CYAN, 11, bold=True)
+            self._make_label(doc, 12, y, cw - 24, 16, "CE QUI EST SURVEILLÉ", CYAN, 10, bold=True)
         )
-        y += 24
+        y += 20
 
         self._info_field = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(16, y, cw - 32, 76)
+            Foundation.NSMakeRect(12, y, cw - 24, 60)
         )
         self._info_field.setEditable_(False)
         self._info_field.setSelectable_(False)
         self._info_field.setRichText_(True)
         self._info_field.setDrawsBackground_(False)
-        self._info_field.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+        self._info_field.setFont_(AppKit.NSFont.systemFontOfSize_(10))
         self._info_field.setTextColor_(_hex_to_nscolor(FG2))
         doc.addSubview_(self._info_field)
         self._dynamic_views.append(self._info_field)
-        y += 82
+        y += 66
 
         # ── Separator ──
         y = self._add_separator_dyn(doc, y, cw)
-        y += 4
 
         # ── ALERTES ──
         self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "ALERTES", RED, 11, bold=True)
+            self._make_label(doc, 12, y, cw - 24, 16, "ALERTES", RED, 10, bold=True)
         )
-        y += 24
+        y += 20
 
         self._text_view = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(10, y, cw - 20, 260)
+            Foundation.NSMakeRect(8, y, cw - 16, 250)
         )
         self._text_view.setEditable_(False)
         self._text_view.setSelectable_(True)
         self._text_view.setRichText_(True)
         self._text_view.setDrawsBackground_(False)
-        self._text_view.setTextContainerInset_(Foundation.NSMakeSize(6, 6))
+        self._text_view.setTextContainerInset_(Foundation.NSMakeSize(4, 4))
         self._text_view.textContainer().setWidthTracksTextView_(True)
         self._text_view.setHorizontallyResizable_(False)
         doc.addSubview_(self._text_view)
         self._dynamic_views.append(self._text_view)
-        y += 266
+        y += 256
 
-        doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 12, 640)))
+        doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 10, 600)))
 
     # ── Helper: create a label ──
 
@@ -1536,17 +2586,17 @@ class NativePanel:
     def _make_checkbox(self, name, checked, y, cw):
         """Create a styled NSButton checkbox."""
         cb = AppKit.NSButton.alloc().initWithFrame_(
-            Foundation.NSMakeRect(20, y, cw - 40, 20)
+            Foundation.NSMakeRect(16, y, cw - 32, 18)
         )
         cb.setButtonType_(AppKit.NSButtonTypeSwitch)
         cb.setTitle_(name)
-        cb.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+        cb.setFont_(AppKit.NSFont.systemFontOfSize_(11))
         cb.setState_(AppKit.NSControlStateValueOn if checked else AppKit.NSControlStateValueOff)
         cell = cb.cell()
         if cell and hasattr(cell, 'setAttributedTitle_'):
             attrs = {
                 AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
-                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
+                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(11),
             }
             astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(name, attrs)
             cell.setAttributedTitle_(astr)
@@ -1572,24 +2622,15 @@ class NativePanel:
 
     # ── Source checkboxes (dynamic) ──
 
-    def refresh_sources(self, audio_names, video_names, cfg, scene_name=None):
-        """Rebuild source checkboxes and all dynamic content when sources or scene change."""
+    def refresh_sources(self, audio_names, video_names, cfg):
+        """Rebuild source checkboxes and all dynamic content when sources change."""
         if not self._doc:
             return
-        if (audio_names == self._last_audio_names
-            and video_names == self._last_video_names
-            and scene_name == self._last_scene):
+        if audio_names == self._last_audio_names and video_names == self._last_video_names:
             return  # no change
         self._last_audio_names = list(audio_names)
         self._last_video_names = list(video_names)
-        self._last_scene = scene_name
-        # MAJ du champ "Scene : XYZ"
-        if self._scene_field:
-            try:
-                self._scene_field.setStringValue_(f"Scène : {scene_name or '—'}")
-            except Exception:
-                pass
-        self._rebuild_dynamic(audio_names, video_names, cfg, scene_name)
+        self._rebuild_dynamic(audio_names, video_names, cfg)
 
     def get_selected_sources(self):
         """Return (audio_names, video_names) of checked sources."""
@@ -1644,27 +2685,19 @@ class NativePanel:
         except Exception as e:
             print(f"[panel.status] {e}")
 
-    def update_info(self, audio_names, video_names, cfg, scene_name=None):
+    def update_info(self, audio_names, video_names, cfg):
         """Update the 'CE QUI EST SURVEILLÉ' info section."""
         if not self._info_field:
             return
         try:
             acfg = cfg["checks"]["audio"]
             vcfg = cfg["checks"]["video"]
-            mon_a = None
-            mon_v = None
-            if scene_name and scene_name in cfg.get("scenes", {}):
-                mon_a = cfg["scenes"][scene_name].get("audio")
-                mon_v = cfg["scenes"][scene_name].get("video")
-            if mon_a is None:
-                mon_a = acfg.get("monitor_inputs", None)
-            if mon_v is None:
-                mon_v = vcfg.get("monitor_sources", None)
+            mon_a = acfg.get("monitor_inputs", None)
+            mon_v = vcfg.get("monitor_sources", None)
             a_str = "(toutes)" if mon_a is None else (", ".join(mon_a) if mon_a else "(aucune)")
             v_str = "(toutes)" if mon_v is None else (", ".join(mon_v) if mon_v else "(aucune)")
 
             lines = [
-                f"Scène : {scene_name or '—'}",
                 f"Audio : {a_str}",
                 f"Vidéo : {v_str}",
                 f"Seuils : silence {acfg['silence_db']}dB / {acfg['silence_duration_s']}s",
@@ -1678,7 +2711,7 @@ class NativePanel:
             storage.deleteCharactersInRange_(rng)
             attrs = {
                 AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG2),
-                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(11),
+                AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(10),
             }
             astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
             storage.appendAttributedString_(astr)
@@ -1699,17 +2732,17 @@ class NativePanel:
             if not issues:
                 attrs = {
                     AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(GREEN),
-                    AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(13),
+                    AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
                 }
                 ok_str = Foundation.NSAttributedString.alloc().initWithString_attributes_(
-                    "\u2705  Tout est OK\n", attrs
+                    "\u2705  Aucun problème détecté\n", attrs
                 )
                 storage.appendAttributedString_(ok_str)
             else:
                 for i, issue in enumerate(issues):
                     attrs = {
                         AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(RED),
-                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(11),
                     }
                     line = issue + "\n"
                     if i < len(issues) - 1:
@@ -1780,8 +2813,10 @@ class NativeBanner:
         self._lbl_det     = None   # détail des alertes
         self._built       = False
         self._visible     = False
-        self._snooze_until = 0.0   # timestamp jusqu'auquel la bannière est muette
-        self._snooze_targets = []  # garder les targets en vie (évite GC)
+        self._snooze_until   = 0.0  # timestamp jusqu'auquel la bannière est muette (snooze manuel)
+        self._cooldown_until = 0.0  # timestamp jusqu'auquel la bannière est muette (cooldown auto)
+        self._snooze_targets = []   # garder les targets en vie (évite GC)
+        self.cfg = {}               # référence vers self._cfg["banner"] (injecté par OBSMonitorApp)
 
     def build(self):
         if self._built:
@@ -1913,23 +2948,83 @@ class NativeBanner:
             self._visible = False
         print(f"[banner] snooze {duration/60:.0f} min")
 
+    # Mapping abréviation FR → weekday (lundi=0 … dimanche=6)
+    _DAY_MAP = {
+        "lun": 0, "mar": 1, "mer": 2, "jeu": 3,
+        "ven": 4, "sam": 5, "dim": 6,
+    }
+
+    def _in_active_window(self):
+        """Retourne True si le jour ET l'heure actuels sont dans la plage configurée."""
+        try:
+            now_dt = datetime.datetime.now()
+            now_t  = now_dt.time()
+
+            # ── Vérification du jour ──────────────────────────────────────
+            days_str = self.cfg.get("active_days", "lun,mar,mer,jeu,ven,sam,dim")
+            active_days = {
+                self._DAY_MAP[d.strip().lower()]
+                for d in days_str.split(",")
+                if d.strip().lower() in self._DAY_MAP
+            }
+            if not active_days:
+                active_days = set(range(7))   # si vide → tous les jours
+            if now_dt.weekday() not in active_days:
+                return False
+
+            # ── Vérification de l'heure ───────────────────────────────────
+            frm = datetime.time(*map(int, self.cfg.get("active_from", "00:00").split(":")))
+            unt = datetime.time(*map(int, self.cfg.get("active_until", "23:59").split(":")))
+            if frm <= unt:
+                return frm <= now_t <= unt
+            else:  # plage chevauchant minuit
+                return now_t >= frm or now_t <= unt
+        except Exception:
+            return False
+
     def update(self, issues, flash_state):
         """Update banner visibility and content based on issues."""
         if not self._panel:
             return
 
-        # Si plus d'alerte : cacher et annuler le snooze (problème résolu)
-        if not issues:
-            if self._snooze_until > 0:
-                self._snooze_until = 0.0
-                print("[banner] problème résolu — snooze annulé")
+        if not self.cfg.get("enabled", True):
             if self._visible:
                 self._panel.orderOut_(None)
                 self._visible = False
             return
 
-        # Snooze actif : bannière muette
-        if time.time() < self._snooze_until:
+        now = time.time()
+
+        # Si plus d'alerte : cacher et démarrer cooldown.
+        # NE PAS reset le snooze manuel — sinon une interruption d'1 tick (la
+        # personne se recentre brièvement) annule le « Ok pour 1h » et la
+        # bannière revient au prochain drift. On laisse le snooze expirer seul.
+        if not issues:
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
+                # Démarrer le cooldown auto
+                cooldown = float(self.cfg.get("cooldown_s", 0))
+                if cooldown > 0:
+                    self._cooldown_until = now + cooldown
+            return
+
+        # Snooze manuel actif
+        if now < self._snooze_until:
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
+            return
+
+        # Cooldown auto actif (après résolution d'une alerte précédente)
+        if now < self._cooldown_until:
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
+            return
+
+        # Hors plage horaire
+        if not self._in_active_window():
             if self._visible:
                 self._panel.orderOut_(None)
                 self._visible = False
@@ -1983,6 +3078,229 @@ class NativeBanner:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NativeWarningBanner — écran jaune "RECADRER LA CAMÉRA"
+# Moins urgent que NativeBanner (rouge) — avertissement de cadrage uniquement.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class NativeWarningBanner:
+    """
+    Plein écran, semi-transparent, ambre/jaune.
+    Affiche "RECADRER LA CAMÉRA" + détail du cadrage.
+    Bouton pour ignorer temporairement.
+    """
+
+    _DAY_MAP = {
+        "lun": 0, "mar": 1, "mer": 2, "jeu": 3,
+        "ven": 4, "sam": 5, "dim": 6,
+    }
+
+    def __init__(self):
+        self._panel          = None
+        self._lbl_cta        = None
+        self._lbl_det        = None
+        self._built          = False
+        self._visible        = False
+        self._snooze_until   = 0.0
+        self._snooze_targets = []
+        self.cfg             = {}   # injected by OBSMonitorApp: self._cfg["warn_banner"]
+
+    def build(self):
+        if self._built:
+            return
+        self._built = True
+
+        screens = AppKit.NSScreen.screens()
+        if not screens:
+            return
+        main = screens[0].frame()
+        sw = main.size.width
+        sh = main.size.height
+
+        style = (
+            AppKit.NSWindowStyleMaskBorderless |
+            AppKit.NSWindowStyleMaskNonactivatingPanel
+        )
+        rect = Foundation.NSMakeRect(0, 0, sw, sh)
+        self._panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, style, AppKit.NSBackingStoreBuffered, False,
+        )
+        self._panel.setLevel_(AppKit.NSFloatingWindowLevel + 1)   # sous le banner rouge
+        self._panel.setHidesOnDeactivate_(False)
+        self._panel.setFloatingPanel_(True)
+        self._panel.setBecomesKeyOnlyIfNeeded_(True)
+        behavior = (
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
+            AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
+        self._panel.setCollectionBehavior_(behavior)
+        self._panel.setOpaque_(False)
+        self._panel.setBackgroundColor_(_hex_to_nscolor(WARN_A))
+        self._panel.setAlphaValue_(0.80)
+        self._panel.setSharingType_(1)
+
+        content = self._panel.contentView()
+
+        # ── Label principal ──
+        cta_rect = Foundation.NSMakeRect(20, sh * 0.44, sw - 40, sh * 0.18)
+        self._lbl_cta = AppKit.NSTextField.alloc().initWithFrame_(cta_rect)
+        self._lbl_cta.setStringValue_("RECADRER LA CAMÉRA")
+        self._lbl_cta.setTextColor_(AppKit.NSColor.whiteColor())
+        self._lbl_cta.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self._lbl_cta.setFont_(AppKit.NSFont.boldSystemFontOfSize_(64))
+        self._lbl_cta.setBezeled_(False)
+        self._lbl_cta.setEditable_(False)
+        self._lbl_cta.setSelectable_(False)
+        self._lbl_cta.setDrawsBackground_(False)
+        self._lbl_cta.setAlignment_(AppKit.NSTextAlignmentCenter)
+        self._lbl_cta.cell().setWraps_(True)
+        content.addSubview_(self._lbl_cta)
+
+        # ── Label secondaire : détail ──
+        det_rect = Foundation.NSMakeRect(20, sh * 0.34, sw - 40, sh * 0.10)
+        self._lbl_det = AppKit.NSTextField.alloc().initWithFrame_(det_rect)
+        self._lbl_det.setStringValue_("")
+        self._lbl_det.setTextColor_(AppKit.NSColor.whiteColor())
+        self._lbl_det.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self._lbl_det.setFont_(AppKit.NSFont.boldSystemFontOfSize_(22))
+        self._lbl_det.setBezeled_(False)
+        self._lbl_det.setEditable_(False)
+        self._lbl_det.setSelectable_(False)
+        self._lbl_det.setDrawsBackground_(False)
+        self._lbl_det.setAlignment_(AppKit.NSTextAlignmentCenter)
+        self._lbl_det.cell().setWraps_(True)
+        content.addSubview_(self._lbl_det)
+
+        # ── Bouton snooze ──
+        snooze_options = [
+            ("Ok pour 10 minutes",  600),
+            ("Ok pour 30 minutes",  1800),
+            ("Ok pour 1h",          3600),
+        ]
+        n_btns  = len(snooze_options)
+        btn_w   = 220
+        btn_h   = 50
+        spacing = 24
+        total_w = n_btns * btn_w + (n_btns - 1) * spacing
+        start_x = (sw - total_w) / 2
+        btn_y   = sh * 0.14
+
+        for i, (label, duration) in enumerate(snooze_options):
+            bx = start_x + i * (btn_w + spacing)
+            btn_rect = Foundation.NSMakeRect(bx, btn_y, btn_w, btn_h)
+            btn = AppKit.NSButton.alloc().initWithFrame_(btn_rect)
+            btn.setBezelStyle_(AppKit.NSBezelStyleRegularSquare)
+            btn.setBordered_(False)
+            btn.setWantsLayer_(True)
+            btn.layer().setCornerRadius_(12.0)
+            btn.layer().setBackgroundColor_(
+                AppKit.NSColor.colorWithWhite_alpha_(1.0, 0.92).CGColor()
+            )
+            attrs = {
+                AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(WARN_A),
+                AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(15),
+            }
+            astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(label, attrs)
+            btn.setAttributedTitle_(astr)
+
+            target = _SnoozeTarget.alloc().init()
+            _dur   = duration
+            target._callback = lambda d=_dur: self.snooze(d)
+            self._snooze_targets.append(target)
+            btn.setTarget_(target)
+            btn.setAction_("clicked:")
+            content.addSubview_(btn)
+
+        self._panel.orderOut_(None)
+
+    def snooze(self, duration):
+        self._snooze_until = time.time() + max(0, duration)
+        if self._panel and self._visible:
+            self._panel.orderOut_(None)
+            self._visible = False
+        print(f"[warn_banner] snooze {duration/60:.0f} min")
+
+    def _in_active_window(self):
+        """Retourne True si le jour ET l'heure actuels sont dans la plage configurée."""
+        try:
+            now_dt = datetime.datetime.now()
+            now_t  = now_dt.time()
+
+            days_str = self.cfg.get("active_days", "lun,mar,mer,jeu,ven,sam,dim")
+            active_days = {
+                self._DAY_MAP[d.strip().lower()]
+                for d in days_str.split(",")
+                if d.strip().lower() in self._DAY_MAP
+            }
+            if not active_days:
+                active_days = set(range(7))
+            if now_dt.weekday() not in active_days:
+                return False
+
+            frm = datetime.time(*map(int, self.cfg.get("active_from", "00:00").split(":")))
+            unt = datetime.time(*map(int, self.cfg.get("active_until", "23:59").split(":")))
+            if frm <= unt:
+                return frm <= now_t <= unt
+            else:
+                return now_t >= frm or now_t <= unt
+        except Exception:
+            return False
+
+    def update(self, headroom_issues, flash_state):
+        if not self._panel:
+            return
+
+        now = time.time()
+
+        if not headroom_issues:
+            # NE PAS reset le snooze ici — sinon le « Ok pour 1h » saute dès
+            # que le recadrage redevient bon une fraction de seconde.
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
+            return
+
+        if now < self._snooze_until:
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
+            return
+
+        if not self._in_active_window():
+            if self._visible:
+                self._panel.orderOut_(None)
+                self._visible = False
+            return
+
+        # Texte de détail
+        detail = "  |  ".join(
+            iss.split("—")[0].strip() for iss in headroom_issues[:2]
+        )
+        try:
+            self._lbl_det.setStringValue_(detail)
+        except Exception:
+            pass
+
+        # Flash ambre
+        color = WARN_B if flash_state else WARN_A
+        self._panel.setBackgroundColor_(_hex_to_nscolor(color))
+
+        if not self._visible:
+            self._panel.orderFrontRegardless()
+            self._visible = True
+        else:
+            self._panel.orderFrontRegardless()
+
+        # Boost au-dessus d'OBS (mais sous le banner rouge)
+        obs_level = _get_obs_projector_level()
+        self._panel.setLevel_(max(AppKit.NSFloatingWindowLevel + 1, obs_level + 1))
+
+    def hide(self):
+        if self._panel and self._visible:
+            self._panel.orderOut_(None)
+            self._visible = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main app: rumps menu bar + OBS monitoring
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2015,12 +3333,14 @@ class OBSMonitorRumps(rumps.App):
 
         self._audio = AudioMonitor(self._cfg["checks"]["audio"])
         self._video = VideoMonitor(self._cfg["checks"]["video"], self._get_req)
+        self._video.set_scene_switch_cfg(
+            self._cfg.setdefault("scene_switch", dict(DEFAULT_CONFIG["scene_switch"]))
+        )
         # Selection des sources par scene (cfg["scenes"]) — partagee avec les monitors
         self._scenes_cfg = self._cfg.setdefault("scenes", {})
         self._audio.set_scenes_cfg(self._scenes_cfg)
         self._video.set_scenes_cfg(self._scenes_cfg)
         self._current_scene = None
-        self._all_scenes = []  # liste complete des scenes OBS
 
         # SMS notifier — partage le dict de config (modifs propagées en direct)
         if "sms" not in self._cfg:
@@ -2029,15 +3349,14 @@ class OBSMonitorRumps(rumps.App):
         self._sms = SMSNotifier(self._cfg["sms"])
         self._was_connected = False  # pour détecter perte de connexion
 
-        # FaceSwitcher : auto-switch de scene selon nb de visages detectes
-        self._cfg.setdefault("face_switch", dict(DEFAULT_CONFIG["face_switch"]))
-        self._face = FaceSwitcher(
-            self._cfg["face_switch"], self._get_req,
-            lambda: self._current_scene, self._set_current_scene
-        )
-
         self._panel  = NativePanel()
-        self._banner = NativeBanner()
+        self._form_alerts_config = _FormPanel("⚙️  Seuils et horaires des alertes", width=500)
+        self._settings_panel = _WebSettingsPanel("⚙️  Configuration OBS Monitor")
+        self._banner         = NativeBanner()
+        self._warn_banner    = NativeWarningBanner()
+        self._banner.cfg = self._cfg.setdefault("banner", dict(DEFAULT_CONFIG["banner"]))
+        warn_cfg = self._cfg.setdefault("warn_banner", dict(DEFAULT_CONFIG["warn_banner"]))
+        self._warn_banner.cfg = warn_cfg
         self._update_ver = None
         self._update_url = None
         self._prev_issues = []
@@ -2052,7 +3371,8 @@ class OBSMonitorRumps(rumps.App):
         self._transparent_item = rumps.MenuItem("Panneau transparent", callback=self._on_toggle_transparent)
 
         # OBS connection config
-        self._config_item = rumps.MenuItem("Configuration OBS…", callback=self._on_config)
+        self._config_item  = rumps.MenuItem("Configuration OBS…", callback=self._on_config)
+        self._alerts_config_item = rumps.MenuItem("⚙️  Seuils et horaires des alertes…", callback=self._on_alerts_config)
 
         # SMS items
         sms_on = self._cfg.get("sms", {}).get("enabled", False)
@@ -2060,19 +3380,13 @@ class OBSMonitorRumps(rumps.App):
             "SMS : activé" if sms_on else "SMS : désactivé",
             callback=self._on_toggle_sms,
         )
-        self._sms_config_item  = rumps.MenuItem("Configuration SMS…", callback=self._on_sms_config)
-        self._sms_hours_item   = rumps.MenuItem(self._sms_hours_label(), callback=self._on_sms_hours)
-        self._sms_test_item    = rumps.MenuItem("Envoyer SMS de test", callback=self._on_sms_test)
+        self._sms_test_item = rumps.MenuItem("Envoyer SMS de test", callback=self._on_sms_test)
 
-        # Auto-switch scene par visages
-        face_on = self._cfg.get("face_switch", {}).get("enabled", False)
-        self._face_toggle_item = rumps.MenuItem(
-            "Auto-switch scène : activé" if face_on else "Auto-switch scène : désactivé",
-            callback=self._on_toggle_face_switch,
-        )
-        self._face_config_item = rumps.MenuItem(
-            "Configuration auto-switch…", callback=self._on_face_switch_config
-        )
+        # Selection des sources par scene
+        self._save_scene_sources_item  = rumps.MenuItem("Mémoriser sources pour cette scène",
+                                                         callback=self._on_save_scene_sources)
+        self._clear_scene_sources_item = rumps.MenuItem("Effacer sélection pour cette scène",
+                                                         callback=self._on_clear_scene_sources)
 
         self._update_item = rumps.MenuItem("Vérifier mise à jour…", callback=self._on_check_update_menu)
         self._quit_item = rumps.MenuItem("Quitter", callback=self._on_quit)
@@ -2085,13 +3399,12 @@ class OBSMonitorRumps(rumps.App):
             self._transparent_item,
             None,
             self._config_item,
+            self._alerts_config_item,
             self._sms_toggle_item,
-            self._sms_config_item,
-            self._sms_hours_item,
             self._sms_test_item,
             None,
-            self._face_toggle_item,
-            self._face_config_item,
+            self._save_scene_sources_item,
+            self._clear_scene_sources_item,
             None,
             self._update_item,
             None,
@@ -2116,7 +3429,146 @@ class OBSMonitorRumps(rumps.App):
     def _on_quit(self, _):
         self._save_positions()
         self._banner.hide()
+        self._warn_banner.hide()
         rumps.quit_application()
+
+    def _on_alerts_config(self, _):
+        """Ouvre le panneau natif de configuration des seuils et de l'écran rouge."""
+        a  = self._cfg["checks"]["audio"]
+        v  = self._cfg["checks"]["video"]
+        b  = self._cfg.setdefault("banner", dict(DEFAULT_CONFIG["banner"]))
+        w  = self._cfg.setdefault("warn_banner", dict(DEFAULT_CONFIG["warn_banner"]))
+        s  = self._cfg.setdefault("sms", dict(DEFAULT_CONFIG["sms"]))
+        sc = self._cfg.setdefault("scene_switch", dict(DEFAULT_CONFIG["scene_switch"]))
+
+        sections = [
+            ("AUDIO — Silence", [
+                ("Surveiller le silence",             "silence_enabled",    "toggle", a.get("silence_enabled", True)),
+                ("Silence si niveau en dessous de",   "silence_db",         "stepper", int(a.get("silence_db", -62)),         -100, -1, 1, "dB"),
+                ("Durée avant alerte",                "silence_duration_s", "stepper", int(a.get("silence_duration_s", 10)),   1, 300, 1, "secondes"),
+            ]),
+            ("AUDIO — Saturation (clipping)", [
+                ("Surveiller la saturation",          "clip_enabled",  "toggle", a.get("clip_enabled", True)),
+                ("Saturation si niveau au-dessus de", "clip_db",       "stepper", int(a.get("clip_db", -1)),  -20, 0, 1, "dB"),
+            ]),
+            ("AUDIO — Bourdonnement (signal plat)", [
+                ("Surveiller le bourdonnement",            "flat_enabled",    "toggle", a.get("flat_enabled", True)),
+                ("Durée signal plat avant alerte",         "flat_duration_s", "stepper", int(a.get("flat_duration_s", 5)), 1, 120, 1, "secondes"),
+            ]),
+            ("VIDÉO — Image figée", [
+                ("Surveiller l'image figée",          "freeze_enabled",    "toggle", v.get("freeze_enabled", True)),
+                ("Durée figée avant alerte",          "freeze_duration_s", "stepper", int(v.get("freeze_duration_s", 3)), 1, 60, 1, "secondes"),
+            ]),
+            ("VIDÉO — Image sombre", [
+                ("Surveiller l'image sombre",         "dark_enabled",    "toggle", v.get("dark_enabled", True)),
+                ("Sombre si luminosité inférieure à", "dark_threshold",  "stepper", int(v.get("dark_threshold", 30)),  5, 120, 1, "/ 255"),
+            ]),
+            ("VIDÉO — Surexposition", [
+                ("Surveiller la surexposition",       "bright_enabled",    "toggle", v.get("bright_enabled", True)),
+                ("Saturée si luminosité supérieure à","bright_threshold",  "stepper", int(v.get("bright_threshold", 242)), 150, 255, 1, "/ 255"),
+            ]),
+            ("ÉCRAN JAUNE — Cadrage (espace au-dessus du visage)", [
+                ("Activer l'écran jaune",                   "headroom_enabled",    "toggle", v.get("headroom_enabled", True)),
+                ("Espace max au-dessus du visage",          "headroom_pct",        "stepper", int(v.get("headroom_threshold", 0.35)*100), 10, 60, 1, "%"),
+                ("Durée avant avertissement",               "headroom_duration_s", "stepper", int(v.get("headroom_duration_s", 5)), 1, 30, 1, "secondes"),
+                ("Jours actifs",                            "warn_days",           "days",    w.get("active_days", "lun,mar,mer,jeu,ven,sam,dim")),
+                ("Actif à partir de",                       "warn_from",           "time",    w.get("active_from", "00:00")),
+                ("Actif jusqu'à",                           "warn_until",          "time",    w.get("active_until", "23:59")),
+            ]),
+            ("AUTO-SWITCH SCÈNE (1↔2 personnes)", [
+                ("Activer le switch auto de scène",         "sc_enabled",   "toggle",  sc.get("enabled", False)),
+                ("Scène 1 personne  (nom OBS exact)",       "sc_scene_1p",  "text",    sc.get("scene_1p", "")),
+                ("Scène 2 personnes (nom OBS exact)",       "sc_scene_2p",  "text",    sc.get("scene_2p", "")),
+                ("Durée de détection avant switch",         "sc_trigger_s", "stepper", int(sc.get("trigger_s", 20)), 5, 60, 5, "secondes"),
+            ]),
+            ("ÉCRAN ROUGE", [
+                ("Activer l'écran rouge",             "banner_enabled", "toggle", b.get("enabled", True)),
+                ("Jours actifs",                      "active_days",    "days",   b.get("active_days", "lun,mar,mer,jeu,ven,sam,dim")),
+                ("Actif à partir de",                 "active_from",    "time",   b.get("active_from", "00:00")),
+                ("Actif jusqu'à",                     "active_until",   "time",   b.get("active_until", "23:59")),
+                ("Cooldown après résolution",         "cooldown_s",     "stepper", int(b.get("cooldown_s", 0)), 0, 3600, 30, "secondes"),
+            ]),
+            ("NOTIFICATIONS macOS", [
+                ("Activer les notifications",         "notif_enabled",      "toggle", b.get("notif_enabled", True)),
+                ("Fréquence minimum entre notifs",    "notif_cooldown_min", "stepper", int(b.get("notif_cooldown_s", 1800)//60), 1, 240, 1, "minutes"),
+            ]),
+            ("SMS (sms8.io)", [
+                ("Activer les SMS",                   "sms_enabled",        "toggle", s.get("enabled", False)),
+                ("Clé API",                           "sms_api_key",        "text",   s.get("api_key", "")),
+                ("Périphérique  (ex : 9210|0)",       "sms_device",         "text",   s.get("device", "")),
+                ("Destinataire  (ex : +33612…)",      "sms_recipient",      "text",   s.get("recipient", "")),
+                ("Cooldown entre SMS",                "sms_cooldown_min",   "stepper", int(s.get("cooldown_s", 600)//60), 1, 120, 1, "minutes"),
+                ("Délai avant premier SMS",           "sms_min_dur_s",      "stepper", int(s.get("min_duration_s", 30)), 10, 300, 5, "secondes"),
+                ("Jours d'envoi",                     "sms_days",           "days",   s.get("days", "lun,mar,mer,jeu,ven,sam,dim")),
+                ("Envoyer à partir de",               "sms_send_from",      "time",   s.get("send_from", "10:00")),
+                ("Envoyer jusqu'à",                   "sms_send_until",     "time",   s.get("send_until", "18:30")),
+            ]),
+        ]
+
+        def on_save(vals):
+            def iv(k, d):
+                try: return int(vals[k])
+                except: return d
+            def sv(k, d): return vals.get(k, d) if isinstance(vals.get(k, d), str) else d
+            def bv(k, d): return bool(vals.get(k, d))
+
+            a["silence_enabled"]    = bv("silence_enabled",    True)
+            a["silence_db"]         = iv("silence_db",         -62)
+            a["silence_duration_s"] = iv("silence_duration_s", 10)
+            a["clip_enabled"]       = bv("clip_enabled",       True)
+            a["clip_db"]            = iv("clip_db",            -1)
+            a["flat_enabled"]       = bv("flat_enabled",       True)
+            a["flat_duration_s"]    = iv("flat_duration_s",    5)
+
+            v["freeze_enabled"]     = bv("freeze_enabled",     True)
+            v["freeze_duration_s"]  = iv("freeze_duration_s",  3)
+            v["dark_enabled"]       = bv("dark_enabled",       True)
+            v["dark_threshold"]     = iv("dark_threshold",     30)
+            v["bright_enabled"]     = bv("bright_enabled",     True)
+            v["bright_threshold"]   = iv("bright_threshold",   242)
+            v["headroom_enabled"]   = bv("headroom_enabled",   True)
+            v["headroom_threshold"] = iv("headroom_pct",       35) / 100.0
+            v["headroom_duration_s"]= iv("headroom_duration_s", 5)
+
+            w["active_days"]        = sv("warn_days",           "lun,mar,mer,jeu,ven,sam,dim")
+            w["active_from"]        = sv("warn_from",           "00:00")
+            w["active_until"]       = sv("warn_until",          "23:59")
+
+            b["enabled"]            = bv("banner_enabled",     True)
+            b["active_days"]        = sv("active_days",        "lun,mar,mer,jeu,ven,sam,dim")
+            b["active_from"]        = sv("active_from",        "00:00")
+            b["active_until"]       = sv("active_until",       "23:59")
+            b["cooldown_s"]         = iv("cooldown_s",         0)
+            b["notif_enabled"]      = bv("notif_enabled",      True)
+            b["notif_cooldown_s"]   = iv("notif_cooldown_min", 30) * 60
+
+            s["enabled"]            = bv("sms_enabled",        False)
+            s["api_key"]            = sv("sms_api_key",        "")
+            s["device"]             = sv("sms_device",         "")
+            s["recipient"]          = sv("sms_recipient",      "")
+            s["cooldown_s"]         = iv("sms_cooldown_min",   10) * 60
+            s["min_duration_s"]     = iv("sms_min_dur_s",      30)
+            s["days"]               = sv("sms_days",           "lun,mar,mer,jeu,ven,sam,dim")
+            s["send_from"]          = sv("sms_send_from",      "10:00")
+            s["send_until"]         = sv("sms_send_until",     "18:30")
+
+            sc["enabled"]           = bv("sc_enabled",    False)
+            sc["scene_1p"]          = sv("sc_scene_1p",  "")
+            sc["scene_2p"]          = sv("sc_scene_2p",  "")
+            sc["trigger_s"]         = iv("sc_trigger_s", 20)
+
+            self._banner.cfg      = b
+            self._warn_banner.cfg = w
+            self._video.set_scene_switch_cfg(sc)
+            # Sync SMS toggle menu item
+            try:
+                self._sms_toggle_item.title = "SMS : activé" if s["enabled"] else "SMS : désactivé"
+            except Exception:
+                pass
+            save_config(self._cfg)
+            rumps.notification("OBS Monitor", "", "Configuration enregistrée ✓", sound=False)
+
+        self._settings_panel.show(sections, on_save)
 
     def _on_config(self, _):
         """Show OBS connection config dialog."""
@@ -2253,70 +3705,6 @@ class OBSMonitorRumps(rumps.App):
             sound=False,
         )
 
-    # ── Auto-switch scene par visages ────────────────────────────────────────
-
-    def _on_toggle_face_switch(self, _):
-        fs = self._cfg.setdefault("face_switch", dict(DEFAULT_CONFIG["face_switch"]))
-        fs["enabled"] = not fs.get("enabled", False)
-        save_config(self._cfg)
-        self._face_toggle_item.title = (
-            "Auto-switch scène : activé" if fs["enabled"]
-            else "Auto-switch scène : désactivé"
-        )
-        rumps.notification(
-            title="OBS Monitor", subtitle="",
-            message="Auto-switch activé" if fs["enabled"] else "Auto-switch désactivé",
-            sound=False,
-        )
-
-    def _on_face_switch_config(self, _):
-        """Configure camera source + scene names for face-switch."""
-        try:
-            fs = self._cfg.setdefault("face_switch", dict(DEFAULT_CONFIG["face_switch"]))
-            current = "|".join([
-                fs.get("camera_source", ""),
-                fs.get("scene_1p", ""),
-                fs.get("scene_2p", ""),
-            ])
-            w = rumps.Window(
-                title="Auto-switch scène",
-                message=(
-                    "Format : SOURCE_CAMÉRA|SCÈNE_1P|SCÈNE_2P\n"
-                    "Laisser un champ vide pour détection auto.\n"
-                    f"Scènes OBS : {', '.join(self._all_scenes) or '(non connecté)'}"
-                ),
-                default_text=current,
-                ok="Enregistrer",
-                cancel="Annuler",
-                dimensions=(420, 80),
-            )
-            resp = w.run()
-            if resp.clicked:
-                parts = resp.text.strip().split("|")
-                if len(parts) >= 1:
-                    fs["camera_source"] = parts[0].strip()
-                if len(parts) >= 2:
-                    fs["scene_1p"] = parts[1].strip()
-                if len(parts) >= 3:
-                    fs["scene_2p"] = parts[2].strip()
-                save_config(self._cfg)
-                rumps.notification(
-                    title="OBS Monitor", subtitle="",
-                    message="Auto-switch enregistré ✓", sound=False,
-                )
-        except Exception as e:
-            print(f"[face_config] {e}")
-
-    def _set_current_scene(self, scene_name):
-        """Bascule la scene OBS active (utilise par FaceSwitcher)."""
-        client = self._get_req()
-        if not client:
-            return
-        try:
-            client.set_current_program_scene(scene_name)
-        except Exception as e:
-            print(f"[set_scene] {e}")
-
     def _on_check_update_menu(self, _):
         threading.Thread(target=self._check_update_bg, daemon=True).start()
 
@@ -2324,12 +3712,32 @@ class OBSMonitorRumps(rumps.App):
         if not self._update_url:
             return
         app_path = _real_app_path()
+        update_item = self._update_item
         def on_progress(msg):
-            print(f"[update] {msg}")
+            # setTitle: sur NSMenuItem DOIT être appelé depuis le main thread
+            # (macOS 15 crashe avec SIGTRAP "Must only be used from the main thread")
+            text = msg[:60]
+            def _apply():
+                try:
+                    update_item.title = text
+                except Exception:
+                    pass
+            try:
+                if HAVE_APPKIT:
+                    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
+                else:
+                    _apply()
+            except Exception:
+                pass
+        rumps.notification(
+            "OBS Monitor", "",
+            f"Mise à jour v{self._update_ver} — téléchargement en cours… L'app va redémarrer automatiquement.",
+            sound=False,
+        )
         threading.Thread(
             target=install_update,
             args=(self._update_url, app_path, on_progress),
-            daemon=True
+            daemon=False,   # non-daemon : survit si rumps tente de quitter
         ).start()
 
     # ── Setup ────────────────────────────────────────────────────────────────
@@ -2338,13 +3746,16 @@ class OBSMonitorRumps(rumps.App):
         """Called after the run loop is ready (via a short timer)."""
         self._panel.build()
         self._banner.build()
+        self._warn_banner.build()
 
         # Wire up save button callback
         self._panel.set_save_callback(self._on_save_sources)
 
         self._video.start()
-        self._face.start()
         threading.Thread(target=self._conn_loop, daemon=True).start()
+
+        # La voix ne démarre JAMAIS automatiquement — l'utilisateur l'active manuellement
+        # (évite la surprise d'une écoute active à chaque lancement)
 
         self._schedule_on_main(5.0, self._check_update_bg_wrapper)
         self._schedule_on_main(4.0, self._check_and_request_permissions)
@@ -2382,9 +3793,8 @@ class OBSMonitorRumps(rumps.App):
                 self._audio.on_volume_meters(data)
 
             def on_current_program_scene_changed(data):
-                # data.scene_name (obs-websocket v5)
                 try:
-                    name = getattr(data, "scene_name", None) or getattr(data, "sceneName", None)
+                    name = getattr(data, "scene_name", None)
                     if name:
                         self._handle_scene_change(name)
                 except Exception as e:
@@ -2399,21 +3809,12 @@ class OBSMonitorRumps(rumps.App):
             self._connected        = True
             self._last_src_refresh = -999   # force refresh immédiat
 
-            # Recupere la scene courante + liste de toutes les scenes
+            # Recupere la scene OBS courante au connect
             try:
                 cur = req.get_current_program_scene().current_program_scene_name
                 self._handle_scene_change(cur)
             except Exception as e:
                 print(f"[scene_init] {e}")
-            try:
-                sl = req.get_scene_list()
-                self._all_scenes = [s["sceneName"] for s in sl.scenes]
-            except Exception:
-                self._all_scenes = []
-            try:
-                self._face.set_scenes(self._all_scenes)
-            except Exception:
-                pass
 
             # Découverte immédiate des sources
             try:
@@ -2468,7 +3869,7 @@ class OBSMonitorRumps(rumps.App):
             except Exception:
                 self._disconnect()
 
-    # ── Source refresh ────────────────────────────────────────────────────────
+    # ── Scene tracking ───────────────────────────────────────────────────────
 
     def _handle_scene_change(self, scene_name):
         """Appele a chaque changement de scene OBS (event + au connect)."""
@@ -2478,9 +3879,43 @@ class OBSMonitorRumps(rumps.App):
         self._current_scene = scene_name
         self._audio.set_current_scene(scene_name)
         self._video.set_current_scene(scene_name)
-        # Force un refresh du panel pour montrer les coches de la nouvelle scene
+        # Force un refresh du panel pour montrer les sources de la nouvelle scene
         self._last_src_refresh = -999
         print(f"[scene] {prev!r} -> {scene_name!r}")
+
+    def _on_save_scene_sources(self, _):
+        """Mémorise la sélection actuelle (monitor_inputs/monitor_sources) pour la scène
+        OBS courante. À chaque retour sur cette scène, la sélection sera restaurée."""
+        cs = self._current_scene
+        if not cs:
+            rumps.notification("OBS Monitor", "",
+                               "Pas de scène détectée — connecte-toi à OBS d'abord", sound=False)
+            return
+        audio = self._cfg["checks"]["audio"].get("monitor_inputs")
+        video = self._cfg["checks"]["video"].get("monitor_sources")
+        scenes = self._cfg.setdefault("scenes", {})
+        scenes[cs] = {
+            "audio": list(audio) if audio is not None else None,
+            "video": list(video) if video is not None else None,
+        }
+        save_config(self._cfg)
+        rumps.notification("OBS Monitor", "",
+                           f"Sources mémorisées pour « {cs} » ✓", sound=False)
+        print(f"[scene-save] {cs!r} audio={audio} video={video}")
+
+    def _on_clear_scene_sources(self, _):
+        """Efface la sélection mémorisée pour la scène courante (retombe sur global)."""
+        cs = self._current_scene
+        if not cs:
+            return
+        scenes = self._cfg.setdefault("scenes", {})
+        if cs in scenes:
+            del scenes[cs]
+            save_config(self._cfg)
+            rumps.notification("OBS Monitor", "",
+                               f"Sélection effacée pour « {cs} »", sound=False)
+
+    # ── Source refresh ────────────────────────────────────────────────────────
 
     def _refresh_sources(self):
         """Discover OBS sources and refresh panel checkboxes + info."""
@@ -2494,15 +3929,13 @@ class OBSMonitorRumps(rumps.App):
 
         # Update panel checkboxes
         try:
-            self._panel.refresh_sources(audio_names, video_names,
-                                        self._cfg, self._current_scene)
+            self._panel.refresh_sources(audio_names, video_names, self._cfg)
         except Exception as e:
             print(f"[src_refresh] panel: {e}")
 
         # Update panel info section
         try:
-            self._panel.update_info(audio_names, video_names, self._cfg,
-                                    self._current_scene)
+            self._panel.update_info(audio_names, video_names, self._cfg)
         except Exception as e:
             print(f"[src_refresh] info: {e}")
 
@@ -2511,53 +3944,47 @@ class OBSMonitorRumps(rumps.App):
         self._on_save_sources()
 
     def _on_save_sources(self):
-        """Save selected sources from panel checkboxes to config (per current scene)."""
+        """Save selected sources from panel checkboxes to config."""
         try:
-            cs = self._current_scene
-            if not cs:
-                return
             audio_sel, video_sel = self._panel.get_selected_sources()
-            scenes = self._cfg.setdefault("scenes", {})
-            scenes.setdefault(cs, {})
-            scenes[cs]["audio"] = audio_sel
-            scenes[cs]["video"] = video_sel
+            self._cfg["checks"]["audio"]["monitor_inputs"] = audio_sel
+            self._cfg["checks"]["video"]["monitor_sources"] = video_sel
             save_config(self._cfg)
             # Update info display
             audio_names = self._audio.known_inputs()
             video_names = self._video.known_sources()
-            self._panel.update_info(audio_names, video_names, self._cfg, cs)
-            print(f"[save] scene={cs!r} audio={audio_sel} video={video_sel}")
+            self._panel.update_info(audio_names, video_names, self._cfg)
+            print(f"[save] audio={audio_sel} vidéo={video_sel}")
+            # Confirm via notification
             rumps.notification(
                 title="OBS Monitor",
                 subtitle="",
-                message=f"Sources de « {cs} » enregistrées ✓",
+                message="Sélection des sources enregistrée ✓",
                 sound=False,
             )
         except Exception as e:
             print(f"[save_sources] {e}")
 
     def _sync_checkboxes(self):
-        """Auto-sync checkbox state to config per scene (no notification)."""
+        """Auto-sync checkbox state to config (no notification)."""
+        # Ne rien faire si OBS n'est pas connecté ou si les sources ne sont pas encore chargées
+        if not self._connected:
+            return
+        if not self._panel._audio_cbs and not self._panel._video_cbs:
+            return
         try:
-            cs = self._current_scene
-            if not cs:
-                return
             audio_sel, video_sel = self._panel.get_selected_sources()
-            scenes = self._cfg.setdefault("scenes", {})
-            cur = scenes.get(cs, {})
-            old_a = cur.get("audio")
-            old_v = cur.get("video")
-            if (old_a is None or old_v is None
-                or sorted(audio_sel) != sorted(old_a)
-                or sorted(video_sel) != sorted(old_v)):
-                scenes.setdefault(cs, {})
-                scenes[cs]["audio"] = audio_sel
-                scenes[cs]["video"] = video_sel
+            old_a = self._cfg["checks"]["audio"].get("monitor_inputs", None)
+            old_v = self._cfg["checks"]["video"].get("monitor_sources", None)
+            if old_a is None or old_v is None or sorted(audio_sel) != sorted(old_a) or sorted(video_sel) != sorted(old_v):
+                self._cfg["checks"]["audio"]["monitor_inputs"] = audio_sel
+                self._cfg["checks"]["video"]["monitor_sources"] = video_sel
                 save_config(self._cfg)
+                # Update info
                 audio_names = self._audio.known_inputs()
                 video_names = self._video.known_sources()
-                self._panel.update_info(audio_names, video_names, self._cfg, cs)
-                print(f"[auto-save] scene={cs!r} audio={audio_sel} video={video_sel}")
+                self._panel.update_info(audio_names, video_names, self._cfg)
+                print(f"[auto-save] audio={audio_sel} vidéo={video_sel}")
         except Exception:
             pass
 
@@ -2588,6 +4015,10 @@ class OBSMonitorRumps(rumps.App):
 
         # Update banner (flashing red bar)
         self._banner.update(issues, self._flash_st)
+
+        # Update warning banner (flashing yellow — cadrage)
+        h_issues = self._video.headroom_issues() if self._connected else []
+        self._warn_banner.update(h_issues, self._flash_st)
 
         # Update menu dropdown
         self._update_menu_issues(issues)
@@ -2645,9 +4076,14 @@ class OBSMonitorRumps(rumps.App):
         now = time.time()
         n = len(issues)
 
+        if not self._cfg.get("banner", {}).get("notif_enabled", True):
+            self._prev_issues = list(issues)
+            return
+
         if n > 0:
             issues_changed = (issues != self._prev_issues)
-            enough_time = (now - self._last_notif_time >= 15)
+            cooldown = float(self._cfg.get("banner", {}).get("notif_cooldown_s", 1800))
+            enough_time = (now - self._last_notif_time >= cooldown)
             if issues_changed and enough_time:
                 self._send_notification(issues)
                 self._last_notif_time = now
