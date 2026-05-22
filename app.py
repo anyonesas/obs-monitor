@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.51"
+VERSION      = "2.5.52"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -164,10 +164,15 @@ DEFAULT_CONFIG = {
         "trigger_s": 10,  # secondes de détection avant switch (10s par défaut)
         "cooldown_s": 30, # secondes de cooldown après switch
     },
-    # Selection des sources par scene OBS :
+    # Selection des sources par scene OBS (legacy v2.5.49) :
     #   { "Nom scene": { "audio": ["Micro 1"], "video": ["Cam Wide"] } }
-    # Si une scene n'a pas d'entree, on retombe sur checks.audio.monitor_inputs (legacy).
     "scenes": {},
+    # Nouveau (v2.5.52+) : portee de surveillance par source.
+    #   { "Nom source": "*" | "" | "<scene>" }
+    #   "*"        = toutes scenes (defaut si absent)
+    #   ""         = desactivee (jamais surveillee)
+    #   "<scene>"  = surveillee uniquement quand cette scene est active
+    "source_scenes": {},
 }
 
 def _bundled_config():
@@ -217,6 +222,7 @@ def load_config():
         for k, v in DEFAULT_CONFIG["scene_switch"].items():
             c["scene_switch"].setdefault(k, v)
     c.setdefault("scenes", {})
+    c.setdefault("source_scenes", {})
     return c
 
 def save_config(cfg):
@@ -683,24 +689,41 @@ class AudioMonitor:
         self._red_alert_until = {}   # {name: ts jusqu'auquel on garde l'alerte rouge}
         # Selection par scene OBS
         self._current_scene = None   # nom scene OBS active
-        self._scenes_cfg    = {}     # ref vers cfg["scenes"]
+        self._scenes_cfg    = {}     # legacy : cfg["scenes"][scene]["audio"]
+        self._source_scenes = {}     # nouveau : cfg["source_scenes"][name] = "*" | "" | "<scene>"
         # {name: {peak_db, last_sound_t, buf: deque[float]}}
 
     def set_scenes_cfg(self, scenes_cfg):
         self._scenes_cfg = scenes_cfg
 
+    def set_source_scenes(self, source_scenes):
+        self._source_scenes = source_scenes
+
     def set_current_scene(self, name):
         with self._lock:
             self._current_scene = name
 
-    def _monitored_list(self):
-        """Inputs surveilles : par-scene si dispo, sinon legacy global."""
+    def _is_monitored(self, name):
+        """True si la source `name` doit etre surveillee sur la scene courante."""
         cs = self._current_scene
+        # 1) Priorite au nouveau modele per-source
+        if name in self._source_scenes:
+            spec = self._source_scenes[name]
+            if spec == "":
+                return False
+            if spec == "*":
+                return True
+            return spec == cs
+        # 2) Legacy : selection par scene (cfg["scenes"][scene]["audio"])
         if cs and cs in self._scenes_cfg:
             v = self._scenes_cfg[cs].get("audio")
             if v is not None:
-                return v
-        return self.cfg.get("monitor_inputs", None)
+                return name in v
+        # 3) Legacy global : monitor_inputs
+        mon = self.cfg.get("monitor_inputs", None)
+        if mon is None:
+            return True
+        return name in mon
 
     def on_volume_meters(self, data):
         now = time.time()
@@ -746,7 +769,6 @@ class AudioMonitor:
 
     def issues(self):
         now     = time.time()
-        monitor = self._monitored_list()
         out     = []
 
         silence_thresh = self.cfg["silence_db"]
@@ -759,8 +781,7 @@ class AudioMonitor:
 
         with self._lock:
             for name, e in self._inputs.items():
-                # monitor=None → tout surveiller, monitor=[] → rien
-                if monitor is not None and name not in monitor:
+                if not self._is_monitored(name):
                     continue
 
                 db      = e["peak_db"]
@@ -873,22 +894,36 @@ class VideoMonitor:
         # Selection par scene OBS
         self._current_scene = None
         self._scenes_cfg    = {}
+        self._source_scenes = {}     # nouveau v2.5.52+
 
     def set_scenes_cfg(self, scenes_cfg):
         self._scenes_cfg = scenes_cfg
+
+    def set_source_scenes(self, source_scenes):
+        self._source_scenes = source_scenes
 
     def set_current_scene(self, name):
         with self._lock:
             self._current_scene = name
 
-    def _monitored_list(self):
-        """Sources video surveillees : par-scene si dispo, sinon legacy global."""
+    def _is_monitored(self, name):
+        """True si la source video `name` doit etre surveillee sur la scene courante."""
         cs = self._current_scene
+        if name in self._source_scenes:
+            spec = self._source_scenes[name]
+            if spec == "":
+                return False
+            if spec == "*":
+                return True
+            return spec == cs
         if cs and cs in self._scenes_cfg:
             v = self._scenes_cfg[cs].get("video")
             if v is not None:
-                return v
-        return self.cfg.get("monitor_sources", None)
+                return name in v
+        mon = self.cfg.get("monitor_sources", None)
+        if mon is None:
+            return True
+        return name in mon
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -917,7 +952,6 @@ class VideoMonitor:
         # Track la scene OBS active pour le filtrage par scene
         with self._lock:
             self._current_scene = scene
-        monitor      = self._monitored_list()
         found        = []
         new_issues   = []
         new_headroom = []
@@ -932,7 +966,7 @@ class VideoMonitor:
             if not src:
                 continue
             found.append(src)
-            if monitor is not None and src not in monitor:
+            if not self._is_monitored(src):
                 continue
 
             img = self._capture(client, src)
@@ -2296,8 +2330,8 @@ class NativePanel:
     so it can appear above OBS Projector (Metal rendering).
     Contains: status, source selection checkboxes, monitoring info, issues list.
     """
-    W = 360
-    PANEL_H = 680
+    W = 420
+    PANEL_H = 720
 
     def __init__(self):
         self._panel = None
@@ -2308,14 +2342,16 @@ class NativePanel:
         self._info_field = None
         self._lock = threading.Lock()
         self._built = False
-        # Source checkboxes
-        self._audio_cbs = []   # [(name, NSButton), ...]
-        self._video_cbs = []
+        # Popup buttons per source : (name, NSPopUpButton, _ActionTarget)
+        self._audio_popups = []
+        self._video_popups = []
         self._dynamic_views = []  # all views below fixed header — rebuilt on source change
         self._save_callback = None
+        self._scene_choice_cb = None  # callback(kind:str, name:str, choice:str)
         self._last_audio_names = []
         self._last_video_names = []
         self._last_scene = None
+        self._last_all_scenes = []
         self._header_end_y = 0  # Y position after fixed header
 
     def build(self):
@@ -2458,10 +2494,10 @@ class NativePanel:
         self._header_end_y = y
 
         # Build initial dynamic content (placeholders)
-        self._rebuild_dynamic([], [], None)
+        self._rebuild_dynamic([], [], None, [])
 
-    def _rebuild_dynamic(self, audio_names, video_names, cfg):
-        """Rebuild all content below the fixed header (sources, info, alerts)."""
+    def _rebuild_dynamic(self, audio_names, video_names, cfg, all_scenes=None):
+        """Rebuild all content below the fixed header (sources + popups, info, alerts)."""
         doc = self._doc
         cw = self._doc_width
 
@@ -2471,33 +2507,26 @@ class NativePanel:
                 v.removeFromSuperview()
             except Exception:
                 pass
-        for _, cb in self._audio_cbs:
+        for tup in self._audio_popups + self._video_popups:
             try:
-                cb.removeFromSuperview()
-            except Exception:
-                pass
-        for _, cb in self._video_cbs:
-            try:
-                cb.removeFromSuperview()
+                tup[1].removeFromSuperview()  # popup
+                # tup[2] = target (just released when list cleared)
             except Exception:
                 pass
         self._dynamic_views = []
-        self._audio_cbs = []
-        self._video_cbs = []
+        self._audio_popups = []
+        self._video_popups = []
 
         y = self._header_end_y
         pad = 14
+        all_scenes = list(all_scenes or [])
 
-        monitored_audio = None  # None = tout coché, set() = rien coché
-        monitored_video = None
+        source_scenes = {}
         if cfg:
-            raw_a = cfg["checks"]["audio"].get("monitor_inputs", None)
-            raw_v = cfg["checks"]["video"].get("monitor_sources", None)
-            monitored_audio = set(raw_a) if raw_a is not None else None
-            monitored_video = set(raw_v) if raw_v is not None else None
+            source_scenes = cfg.get("source_scenes", {}) or {}
 
         def _make_section_card(title_emoji, title_text, title_color, contents_height):
-            """Crée une section card avec header (emoji + titre) et renvoie (y_content_start, card_view)."""
+            """Crée une section card avec header (emoji + titre) et renvoie y_content_start."""
             nonlocal y
             header_h  = 30
             total_h   = header_h + contents_height + 12
@@ -2508,34 +2537,55 @@ class NativePanel:
                 f"{title_emoji}  {title_text}", title_color, 11, bold=True
             )
             self._dynamic_views.append(title_lbl)
-            return y + header_h, card
+            return y + header_h
+
+        def _make_source_row(name, kind, cy):
+            """Cree une ligne : label source + popup choix scene. Retourne le popup tuple."""
+            current = source_scenes.get(name, "*")
+            # Label source
+            lbl_w = cw - 2*pad - 28 - 150  # 150px reserve au popup
+            lbl = self._make_label(doc, pad + 14, cy + 4, lbl_w, 20, name, FG, 12, bold=False)
+            self._dynamic_views.append(lbl)
+            # Popup choix scene
+            pop_x = pad + 14 + lbl_w + 4
+            pop = AppKit.NSPopUpButton.alloc().initWithFrame_(
+                Foundation.NSMakeRect(pop_x, cy, 142, 26)
+            )
+            pop.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            pop.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+            pop.addItemWithTitle_("Toutes les scènes")
+            pop.addItemWithTitle_("Désactivée")
+            pop.menu().addItem_(AppKit.NSMenuItem.separatorItem())
+            for s in all_scenes:
+                pop.addItemWithTitle_(s)
+            # Selectionne l'item courant
+            if current == "":
+                pop.selectItemWithTitle_("Désactivée")
+            elif current == "*" or not current:
+                pop.selectItemWithTitle_("Toutes les scènes")
+            else:
+                pop.selectItemWithTitle_(current)
+                if pop.indexOfSelectedItem() < 0:
+                    pop.selectItemWithTitle_("Toutes les scènes")
+            # Action target — capture name + kind via closure
+            target = _ActionTarget.alloc().init()
+            target._callback = (
+                lambda sender, _n=name, _k=kind:
+                self._on_scene_choice(_k, _n, sender.titleOfSelectedItem())
+            )
+            pop.setTarget_(target)
+            pop.setAction_("action:")
+            doc.addSubview_(pop)
+            return (name, pop, target)
 
         # ── Carte SOURCES AUDIO ──
-        audio_h = max(28, len(audio_names) * 26 + 4) if audio_names else 28
-        content_y, _ = _make_section_card("🎤", "SOURCES AUDIO", ACCENT, audio_h)
+        audio_h = max(28, len(audio_names) * 30 + 4) if audio_names else 28
+        content_y = _make_section_card("🎤", "SOURCES AUDIO", ACCENT, audio_h)
         if audio_names:
             cy = content_y
             for name in audio_names:
-                checked = (monitored_audio is None) or (name in monitored_audio)
-                cb = AppKit.NSButton.alloc().initWithFrame_(
-                    Foundation.NSMakeRect(pad + 18, cy, cw - 2*pad - 36, 22)
-                )
-                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
-                cb.setState_(AppKit.NSControlStateValueOn if checked else AppKit.NSControlStateValueOff)
-                cell = cb.cell()
-                if cell and hasattr(cell, 'setAttributedTitle_'):
-                    attrs = {
-                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
-                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
-                    }
-                    cell.setAttributedTitle_(
-                        Foundation.NSAttributedString.alloc().initWithString_attributes_(name, attrs)
-                    )
-                else:
-                    cb.setTitle_(name)
-                doc.addSubview_(cb)
-                self._audio_cbs.append((name, cb))
-                cy += 26
+                self._audio_popups.append(_make_source_row(name, "audio", cy))
+                cy += 30
         else:
             lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
                                    "En attente de connexion…", FG2, 11, bold=False)
@@ -2543,31 +2593,13 @@ class NativePanel:
         y += 30 + audio_h + 12 + 10
 
         # ── Carte SOURCES VIDÉO ──
-        video_h = max(28, len(video_names) * 26 + 4) if video_names else 28
-        content_y, _ = _make_section_card("📷", "SOURCES VIDÉO", ACCENT, video_h)
+        video_h = max(28, len(video_names) * 30 + 4) if video_names else 28
+        content_y = _make_section_card("📷", "SOURCES VIDÉO", ACCENT, video_h)
         if video_names:
             cy = content_y
             for name in video_names:
-                checked = (monitored_video is None) or (name in monitored_video)
-                cb = AppKit.NSButton.alloc().initWithFrame_(
-                    Foundation.NSMakeRect(pad + 18, cy, cw - 2*pad - 36, 22)
-                )
-                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
-                cb.setState_(AppKit.NSControlStateValueOn if checked else AppKit.NSControlStateValueOff)
-                cell = cb.cell()
-                if cell and hasattr(cell, 'setAttributedTitle_'):
-                    attrs = {
-                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
-                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
-                    }
-                    cell.setAttributedTitle_(
-                        Foundation.NSAttributedString.alloc().initWithString_attributes_(name, attrs)
-                    )
-                else:
-                    cb.setTitle_(name)
-                doc.addSubview_(cb)
-                self._video_cbs.append((name, cb))
-                cy += 26
+                self._video_popups.append(_make_source_row(name, "video", cy))
+                cy += 30
         else:
             lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
                                    "En attente de connexion…", FG2, 11, bold=False)
@@ -2577,7 +2609,7 @@ class NativePanel:
         # ── Hint sous les sources ──
         hint = self._make_label(
             doc, pad + 4, y, cw - 2*pad - 8, 14,
-            "✓ Enregistrement automatique par scène", FG2, 10, bold=False
+            "Pour chaque source : choisis la scène où la surveiller", FG2, 10, bold=False
         )
         self._dynamic_views.append(hint)
         y += 22
@@ -2731,8 +2763,8 @@ class NativePanel:
 
     # ── Source checkboxes (dynamic) ──
 
-    def refresh_sources(self, audio_names, video_names, cfg, scene_name=None):
-        """Rebuild source checkboxes and all dynamic content when sources or scene change."""
+    def refresh_sources(self, audio_names, video_names, cfg, scene_name=None, all_scenes=None):
+        """Rebuild source popups and all dynamic content when sources/scene/all_scenes change."""
         if not self._doc:
             return
         # MAJ du champ scene meme si rien d'autre ne change
@@ -2741,25 +2773,33 @@ class NativePanel:
                 self._scene_field.setStringValue_(f"Scène : {scene_name or '—'}")
             except Exception:
                 pass
+        all_scenes = list(all_scenes or [])
         if (audio_names == self._last_audio_names
             and video_names == self._last_video_names
-            and scene_name == self._last_scene):
+            and scene_name == self._last_scene
+            and all_scenes == self._last_all_scenes):
             return  # no change
         self._last_audio_names = list(audio_names)
         self._last_video_names = list(video_names)
         self._last_scene = scene_name
-        self._rebuild_dynamic(audio_names, video_names, cfg)
+        self._last_all_scenes = all_scenes
+        self._rebuild_dynamic(audio_names, video_names, cfg, all_scenes)
 
-    def get_selected_sources(self):
-        """Return (audio_names, video_names) of checked sources."""
-        audio = [name for name, cb in self._audio_cbs
-                 if cb.state() == AppKit.NSControlStateValueOn]
-        video = [name for name, cb in self._video_cbs
-                 if cb.state() == AppKit.NSControlStateValueOn]
-        return audio, video
+    def set_scene_choice_callback(self, cb):
+        """Stocke le callback appele quand l'utilisateur change le dropdown
+        de scope d'une source. Signature : cb(kind:str, name:str, choice:str)."""
+        self._scene_choice_cb = cb
+
+    def _on_scene_choice(self, kind, name, choice):
+        """Wrapper appele par chaque popup quand l'utilisateur change la selection."""
+        if self._scene_choice_cb:
+            try:
+                self._scene_choice_cb(kind, name, choice)
+            except Exception as e:
+                print(f"[panel.scene_choice] {e}")
 
     def set_save_callback(self, callback):
-        """Store callback — triggered via rumps menu, not panel button."""
+        """(Legacy) Stocke callback ; n'est plus utilise depuis v2.5.52."""
         self._save_callback = callback
 
     # ── Boost above OBS ──
@@ -2823,18 +2863,36 @@ class NativePanel:
         try:
             acfg = cfg["checks"]["audio"]
             vcfg = cfg["checks"]["video"]
-            # Selection par-scene si dispo, sinon legacy global
-            mon_a = None
-            mon_v = None
-            if scene_name and scene_name in cfg.get("scenes", {}):
-                mon_a = cfg["scenes"][scene_name].get("audio")
-                mon_v = cfg["scenes"][scene_name].get("video")
-            if mon_a is None:
-                mon_a = acfg.get("monitor_inputs", None)
-            if mon_v is None:
-                mon_v = vcfg.get("monitor_sources", None)
-            a_str = "(toutes)" if mon_a is None else (", ".join(mon_a) if mon_a else "(aucune)")
-            v_str = "(toutes)" if mon_v is None else (", ".join(mon_v) if mon_v else "(aucune)")
+            source_scenes = cfg.get("source_scenes", {}) or {}
+
+            def _is_monitored_now(name):
+                """Reproduit la logique des monitors pour afficher ce qui est actif."""
+                if name in source_scenes:
+                    spec = source_scenes[name]
+                    if spec == "":
+                        return False
+                    if spec == "*":
+                        return True
+                    return spec == scene_name
+                # Legacy
+                if scene_name and scene_name in cfg.get("scenes", {}):
+                    sc = cfg["scenes"][scene_name]
+                    if name in (audio_names or []) and sc.get("audio") is not None:
+                        return name in sc["audio"]
+                    if name in (video_names or []) and sc.get("video") is not None:
+                        return name in sc["video"]
+                if name in (audio_names or []):
+                    mon = acfg.get("monitor_inputs")
+                    return mon is None or name in mon
+                if name in (video_names or []):
+                    mon = vcfg.get("monitor_sources")
+                    return mon is None or name in mon
+                return True
+
+            a_active = [n for n in (audio_names or []) if _is_monitored_now(n)]
+            v_active = [n for n in (video_names or []) if _is_monitored_now(n)]
+            a_str = ", ".join(a_active) if a_active else "(aucune)"
+            v_str = ", ".join(v_active) if v_active else "(aucune)"
 
             lines = [
                 f"Audio : {a_str}",
@@ -3510,6 +3568,10 @@ class OBSMonitorRumps(rumps.App):
         self._scenes_cfg = self._cfg.setdefault("scenes", {})
         self._audio.set_scenes_cfg(self._scenes_cfg)
         self._video.set_scenes_cfg(self._scenes_cfg)
+        # Nouveau (v2.5.52+) : portee par source (dropdown UI)
+        self._source_scenes = self._cfg.setdefault("source_scenes", {})
+        self._audio.set_source_scenes(self._source_scenes)
+        self._video.set_source_scenes(self._source_scenes)
         self._current_scene = None
 
         # SMS notifier — partage le dict de config (modifs propagées en direct)
@@ -3553,10 +3615,8 @@ class OBSMonitorRumps(rumps.App):
         self._sms_test_item = rumps.MenuItem("Envoyer SMS de test", callback=self._on_sms_test)
 
         # Selection des sources par scene
-        self._save_scene_sources_item  = rumps.MenuItem("Mémoriser sources pour cette scène",
-                                                         callback=self._on_save_scene_sources)
-        self._clear_scene_sources_item = rumps.MenuItem("Effacer sélection pour cette scène",
-                                                         callback=self._on_clear_scene_sources)
+        # (v2.5.52+) Le menu "Mémoriser/Effacer sources pour cette scène"
+        # est remplacé par les dropdowns directement dans le panneau.
 
         self._update_item = rumps.MenuItem("Vérifier mise à jour…", callback=self._on_check_update_menu)
         self._quit_item = rumps.MenuItem("Quitter", callback=self._on_quit)
@@ -3572,9 +3632,6 @@ class OBSMonitorRumps(rumps.App):
             self._alerts_config_item,
             self._sms_toggle_item,
             self._sms_test_item,
-            None,
-            self._save_scene_sources_item,
-            self._clear_scene_sources_item,
             None,
             self._update_item,
             None,
@@ -3919,7 +3976,7 @@ class OBSMonitorRumps(rumps.App):
         self._warn_banner.build()
 
         # Wire up save button callback
-        self._panel.set_save_callback(self._on_save_sources)
+        self._panel.set_scene_choice_callback(self._on_scene_choice_from_panel)
 
         self._video.start()
         threading.Thread(target=self._conn_loop, daemon=True).start()
@@ -4053,37 +4110,31 @@ class OBSMonitorRumps(rumps.App):
         self._last_src_refresh = -999
         print(f"[scene] {prev!r} -> {scene_name!r}")
 
-    def _on_save_scene_sources(self, _):
-        """Mémorise la sélection actuelle (monitor_inputs/monitor_sources) pour la scène
-        OBS courante. À chaque retour sur cette scène, la sélection sera restaurée."""
-        cs = self._current_scene
-        if not cs:
-            rumps.notification("OBS Monitor", "",
-                               "Pas de scène détectée — connecte-toi à OBS d'abord", sound=False)
-            return
-        audio = self._cfg["checks"]["audio"].get("monitor_inputs")
-        video = self._cfg["checks"]["video"].get("monitor_sources")
-        scenes = self._cfg.setdefault("scenes", {})
-        scenes[cs] = {
-            "audio": list(audio) if audio is not None else None,
-            "video": list(video) if video is not None else None,
-        }
+    def _on_scene_choice_from_panel(self, kind, source_name, choice):
+        """Callback : l'utilisateur a change le dropdown de scope pour une source.
+        choice est un titre du popup : "Toutes les scènes" / "Désactivée" / "<nom scene>".
+        Convertit en valeur stockee dans cfg["source_scenes"][source_name] :
+          "*"        = toutes scenes
+          ""         = desactivee
+          "<scene>"  = scene specifique
+        """
+        ss = self._cfg.setdefault("source_scenes", {})
+        if choice == "Toutes les scènes":
+            spec = "*"
+        elif choice == "Désactivée":
+            spec = ""
+        else:
+            spec = choice or "*"
+        ss[source_name] = spec
         save_config(self._cfg)
-        rumps.notification("OBS Monitor", "",
-                           f"Sources mémorisées pour « {cs} » ✓", sound=False)
-        print(f"[scene-save] {cs!r} audio={audio} video={video}")
-
-    def _on_clear_scene_sources(self, _):
-        """Efface la sélection mémorisée pour la scène courante (retombe sur global)."""
-        cs = self._current_scene
-        if not cs:
-            return
-        scenes = self._cfg.setdefault("scenes", {})
-        if cs in scenes:
-            del scenes[cs]
-            save_config(self._cfg)
-            rumps.notification("OBS Monitor", "",
-                               f"Sélection effacée pour « {cs} »", sound=False)
+        print(f"[source_scope] {kind} {source_name!r} -> {spec!r}")
+        # MAJ live de l'affichage "ce qui est surveille"
+        try:
+            audio_names = self._audio.known_inputs()
+            video_names = self._video.known_sources()
+            self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
+        except Exception:
+            pass
 
     # ── Source refresh ────────────────────────────────────────────────────────
 
@@ -4097,68 +4148,24 @@ class OBSMonitorRumps(rumps.App):
         audio_names = self._audio.known_inputs()
         video_names = self._video.known_sources()
 
-        # Update panel checkboxes
+        # Update panel popups (sources + scope) + info
         try:
             self._panel.refresh_sources(audio_names, video_names,
-                                        self._cfg, self._current_scene)
+                                        self._cfg, self._current_scene,
+                                        self._all_scenes)
         except Exception as e:
             print(f"[src_refresh] panel: {e}")
 
-        # Update panel info section
         try:
             self._panel.update_info(audio_names, video_names,
                                     self._cfg, self._current_scene)
         except Exception as e:
             print(f"[src_refresh] info: {e}")
 
-    def _on_save_sources_menu(self, _):
-        """Menu callback for saving source selection."""
-        self._on_save_sources()
-
-    def _on_save_sources(self):
-        """Save selected sources from panel checkboxes to config."""
-        try:
-            audio_sel, video_sel = self._panel.get_selected_sources()
-            self._cfg["checks"]["audio"]["monitor_inputs"] = audio_sel
-            self._cfg["checks"]["video"]["monitor_sources"] = video_sel
-            save_config(self._cfg)
-            # Update info display
-            audio_names = self._audio.known_inputs()
-            video_names = self._video.known_sources()
-            self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
-            print(f"[save] audio={audio_sel} vidéo={video_sel}")
-            # Confirm via notification
-            rumps.notification(
-                title="OBS Monitor",
-                subtitle="",
-                message="Sélection des sources enregistrée ✓",
-                sound=False,
-            )
-        except Exception as e:
-            print(f"[save_sources] {e}")
-
     def _sync_checkboxes(self):
-        """Auto-sync checkbox state to config (no notification)."""
-        # Ne rien faire si OBS n'est pas connecté ou si les sources ne sont pas encore chargées
-        if not self._connected:
-            return
-        if not self._panel._audio_cbs and not self._panel._video_cbs:
-            return
-        try:
-            audio_sel, video_sel = self._panel.get_selected_sources()
-            old_a = self._cfg["checks"]["audio"].get("monitor_inputs", None)
-            old_v = self._cfg["checks"]["video"].get("monitor_sources", None)
-            if old_a is None or old_v is None or sorted(audio_sel) != sorted(old_a) or sorted(video_sel) != sorted(old_v):
-                self._cfg["checks"]["audio"]["monitor_inputs"] = audio_sel
-                self._cfg["checks"]["video"]["monitor_sources"] = video_sel
-                save_config(self._cfg)
-                # Update info
-                audio_names = self._audio.known_inputs()
-                video_names = self._video.known_sources()
-                self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
-                print(f"[auto-save] audio={audio_sel} vidéo={video_sel}")
-        except Exception:
-            pass
+        """(Obsolete depuis v2.5.52 — les dropdowns ecrivent directement dans
+        cfg["source_scenes"] via _on_scene_choice_from_panel.)"""
+        return
 
     # ── Tick (rumps timer) ───────────────────────────────────────────────────
 
