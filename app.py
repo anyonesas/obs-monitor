@@ -2370,16 +2370,33 @@ class NativePanel:
         self._panel.setCollectionBehavior_(behavior)
 
         self._panel.setOpaque_(False)
-        self._panel.setBackgroundColor_(_hex_to_nscolor(BG))
-        self._panel.setAlphaValue_(0.97)
+        self._panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self._panel.setAlphaValue_(1.0)
         self._panel.setMinSize_(Foundation.NSMakeSize(self.W, 300))
         self._panel.setSharingType_(1)  # NSWindowSharingReadOnly
 
-        # ── Main scroll view wrapping all content ──
+        # ── Frosted glass background (NSVisualEffectView) ──
         content = self._panel.contentView()
         cf = content.frame()
         cw, ch = cf.size.width, cf.size.height
 
+        try:
+            effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(
+                Foundation.NSMakeRect(0, 0, cw, ch)
+            )
+            effect.setAutoresizingMask_(
+                AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+            )
+            effect.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+            effect.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+            effect.setState_(AppKit.NSVisualEffectStateActive)
+            content.addSubview_(effect)
+        except Exception:
+            # Fallback : solid dark bg
+            self._panel.setOpaque_(True)
+            self._panel.setBackgroundColor_(_hex_to_nscolor(BG))
+
+        # ── Main scroll view wrapping all content ──
         scroll = AppKit.NSScrollView.alloc().initWithFrame_(
             Foundation.NSMakeRect(0, 0, cw, ch)
         )
@@ -2388,8 +2405,7 @@ class NativePanel:
         scroll.setAutoresizingMask_(
             AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
         )
-        scroll.setDrawsBackground_(True)
-        scroll.setBackgroundColor_(_hex_to_nscolor(BG))
+        scroll.setDrawsBackground_(False)
 
         # Flipped document view — origin at top-left, Y grows downward
         doc = _FlippedView.alloc().initWithFrame_(
@@ -2412,31 +2428,32 @@ class NativePanel:
     def _build_content(self, doc, cw):
         """Build fixed header elements. Dynamic content is built by _rebuild_dynamic."""
         y = 14
+        pad = 14   # marge horizontale
 
-        # ── Statut connexion (gros, gras, avec dot colorée) ──
+        # ── Carte STATUT (fond) ──
+        card_h = 78
+        self._make_card(doc, pad, y, cw - 2*pad, card_h, bg_hex=BG2, corner=12)
+
+        # Statut connexion (au-dessus, en coord doc flipped)
         self._status_field = self._make_label(
-            doc, 16, y, cw - 32, 22,
-            "● Connexion à OBS…", ORANGE, 14, bold=True
+            doc, pad + 14, y + 14, cw - 2*pad - 28, 22,
+            "● Connexion à OBS…", ORANGE, 15, bold=True
         )
-        y += 28
 
-        # ── Scène OBS courante (sous-texte discret) ──
+        # Scène OBS courante
         self._scene_field = self._make_label(
-            doc, 16, y, cw - 32, 18,
-            "Scène : —", FG2, 11, bold=False
+            doc, pad + 14, y + 44, cw - 2*pad - 28, 20,
+            "Scène : —", FG2, 12, bold=False
         )
-        y += 24
+        y += card_h + 12
 
-        # ── Update notification (masquée par défaut) ──
+        # ── Notification update (masquée par défaut) ──
         self._update_field = self._make_label(
-            doc, 16, y, cw - 32, 16,
-            "", GREEN, 11, bold=True
+            doc, pad + 4, y, cw - 2*pad - 8, 18,
+            "", GREEN, 12, bold=True
         )
         self._update_field.setHidden_(True)
-        y += 20
-
-        # ── Separator ──
-        y = self._add_separator(doc, y, cw)
+        y += 22
 
         self._header_end_y = y
 
@@ -2468,13 +2485,8 @@ class NativePanel:
         self._audio_cbs = []
         self._video_cbs = []
 
-        y = self._header_end_y + 6
-
-        # ── SOURCES AUDIO ──
-        self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "SOURCES AUDIO", ACCENT, 11, bold=True)
-        )
-        y += 24
+        y = self._header_end_y
+        pad = 14
 
         monitored_audio = None  # None = tout coché, set() = rien coché
         monitored_video = None
@@ -2484,59 +2496,97 @@ class NativePanel:
             monitored_audio = set(raw_a) if raw_a is not None else None
             monitored_video = set(raw_v) if raw_v is not None else None
 
+        def _make_section_card(title_emoji, title_text, title_color, contents_height):
+            """Crée une section card avec header (emoji + titre) et renvoie (y_content_start, card_view)."""
+            nonlocal y
+            header_h  = 30
+            total_h   = header_h + contents_height + 12
+            card = self._make_card(doc, pad, y, cw - 2*pad, total_h, bg_hex=BG2, corner=10)
+            self._dynamic_views.append(card)
+            title_lbl = self._make_label(
+                doc, pad + 14, y + 9, cw - 2*pad - 28, 18,
+                f"{title_emoji}  {title_text}", title_color, 11, bold=True
+            )
+            self._dynamic_views.append(title_lbl)
+            return y + header_h, card
+
+        # ── Carte SOURCES AUDIO ──
+        audio_h = max(28, len(audio_names) * 26 + 4) if audio_names else 28
+        content_y, _ = _make_section_card("🎤", "SOURCES AUDIO", ACCENT, audio_h)
         if audio_names:
+            cy = content_y
             for name in audio_names:
                 checked = (monitored_audio is None) or (name in monitored_audio)
-                cb = self._make_checkbox(name, checked, y, cw)
+                cb = AppKit.NSButton.alloc().initWithFrame_(
+                    Foundation.NSMakeRect(pad + 18, cy, cw - 2*pad - 36, 22)
+                )
+                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
+                cb.setState_(AppKit.NSControlStateValueOn if checked else AppKit.NSControlStateValueOff)
+                cell = cb.cell()
+                if cell and hasattr(cell, 'setAttributedTitle_'):
+                    attrs = {
+                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
+                    }
+                    cell.setAttributedTitle_(
+                        Foundation.NSAttributedString.alloc().initWithString_attributes_(name, attrs)
+                    )
+                else:
+                    cb.setTitle_(name)
                 doc.addSubview_(cb)
                 self._audio_cbs.append((name, cb))
-                y += 24
+                cy += 26
         else:
-            lbl = self._make_label(doc, 24, y, cw - 40, 18,
+            lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
                                    "En attente de connexion…", FG2, 11, bold=False)
             self._dynamic_views.append(lbl)
-            y += 22
-        y += 10
+        y += 30 + audio_h + 12 + 10
 
-        # ── SOURCES VIDÉO ──
-        self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "SOURCES VIDÉO", ACCENT, 11, bold=True)
-        )
-        y += 24
-
+        # ── Carte SOURCES VIDÉO ──
+        video_h = max(28, len(video_names) * 26 + 4) if video_names else 28
+        content_y, _ = _make_section_card("📷", "SOURCES VIDÉO", ACCENT, video_h)
         if video_names:
+            cy = content_y
             for name in video_names:
                 checked = (monitored_video is None) or (name in monitored_video)
-                cb = self._make_checkbox(name, checked, y, cw)
+                cb = AppKit.NSButton.alloc().initWithFrame_(
+                    Foundation.NSMakeRect(pad + 18, cy, cw - 2*pad - 36, 22)
+                )
+                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
+                cb.setState_(AppKit.NSControlStateValueOn if checked else AppKit.NSControlStateValueOff)
+                cell = cb.cell()
+                if cell and hasattr(cell, 'setAttributedTitle_'):
+                    attrs = {
+                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
+                    }
+                    cell.setAttributedTitle_(
+                        Foundation.NSAttributedString.alloc().initWithString_attributes_(name, attrs)
+                    )
+                else:
+                    cb.setTitle_(name)
                 doc.addSubview_(cb)
                 self._video_cbs.append((name, cb))
-                y += 24
+                cy += 26
         else:
-            lbl = self._make_label(doc, 24, y, cw - 40, 18,
+            lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
                                    "En attente de connexion…", FG2, 11, bold=False)
             self._dynamic_views.append(lbl)
-            y += 22
-        y += 6
+        y += 30 + video_h + 12 + 6
 
-        # ── Save hint ──
-        self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 14,
-                             "✓ Enregistrement automatique par scène", FG2, 10, bold=False)
+        # ── Hint sous les sources ──
+        hint = self._make_label(
+            doc, pad + 4, y, cw - 2*pad - 8, 14,
+            "✓ Enregistrement automatique par scène", FG2, 10, bold=False
         )
+        self._dynamic_views.append(hint)
         y += 22
 
-        # ── Separator ──
-        y = self._add_separator_dyn(doc, y, cw)
-        y += 4
-
-        # ── CE QUI EST SURVEILLÉ ──
-        self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "CE QUI EST SURVEILLÉ", CYAN, 11, bold=True)
-        )
-        y += 24
-
+        # ── Carte SURVEILLANCE ──
+        survey_h = 90
+        content_y, _ = _make_section_card("🔍", "SURVEILLANCE", CYAN, survey_h)
         self._info_field = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(16, y, cw - 32, 76)
+            Foundation.NSMakeRect(pad + 14, content_y, cw - 2*pad - 28, survey_h - 4)
         )
         self._info_field.setEditable_(False)
         self._info_field.setSelectable_(False)
@@ -2546,20 +2596,13 @@ class NativePanel:
         self._info_field.setTextColor_(_hex_to_nscolor(FG2))
         doc.addSubview_(self._info_field)
         self._dynamic_views.append(self._info_field)
-        y += 82
+        y += 30 + survey_h + 12 + 8
 
-        # ── Separator ──
-        y = self._add_separator_dyn(doc, y, cw)
-        y += 4
-
-        # ── ALERTES ──
-        self._dynamic_views.append(
-            self._make_label(doc, 16, y, cw - 32, 18, "ALERTES", RED, 11, bold=True)
-        )
-        y += 24
-
+        # ── Carte ALERTES ──
+        alerts_h = 240
+        content_y, _ = _make_section_card("⚠️", "ALERTES", RED, alerts_h)
         self._text_view = AppKit.NSTextView.alloc().initWithFrame_(
-            Foundation.NSMakeRect(10, y, cw - 20, 260)
+            Foundation.NSMakeRect(pad + 14, content_y, cw - 2*pad - 28, alerts_h - 4)
         )
         self._text_view.setEditable_(False)
         self._text_view.setSelectable_(True)
@@ -2570,9 +2613,9 @@ class NativePanel:
         self._text_view.setHorizontallyResizable_(False)
         doc.addSubview_(self._text_view)
         self._dynamic_views.append(self._text_view)
-        y += 266
+        y += 30 + alerts_h + 12 + 10
 
-        doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 14, 640)))
+        doc.setFrameSize_(Foundation.NSMakeSize(cw, max(y + 14, 680)))
 
     # ── Helper: create a label ──
 
@@ -2630,6 +2673,61 @@ class NativePanel:
         parent.addSubview_(sep)
         self._dynamic_views.append(sep)
         return y + 12
+
+    # ── Visual helpers : cartes arrondies + pills ──────────────────────────
+
+    def _make_card(self, parent, x, y, w, h, bg_hex=None, corner=10):
+        """Crée une carte arrondie (NSView layer-backed) qui sert de fond.
+        Le contenu doit être ajouté SEPAREMENT à `parent` (au-dessus) avec les
+        mêmes coordonnées dans `parent` (flipped), pour rester aligné."""
+        v = AppKit.NSView.alloc().initWithFrame_(
+            Foundation.NSMakeRect(x, y, w, h)
+        )
+        v.setWantsLayer_(True)
+        if bg_hex:
+            v.layer().setBackgroundColor_(_hex_to_nscolor(bg_hex).CGColor())
+        v.layer().setCornerRadius_(corner)
+        parent.addSubview_(v)
+        return v
+
+    def _make_pill(self, parent, x, y, w, h, text, bg_hex, fg_hex, font_size=12, bold=True):
+        """Crée un badge type pill (rectangle arrondi avec texte centré)."""
+        pill = AppKit.NSTextField.alloc().initWithFrame_(
+            Foundation.NSMakeRect(x, y, w, h)
+        )
+        pill.setStringValue_("  " + text + "  ")
+        pill.setBezeled_(False)
+        pill.setEditable_(False)
+        pill.setSelectable_(False)
+        pill.setDrawsBackground_(False)
+        pill.setAlignment_(AppKit.NSTextAlignmentLeft)
+        attrs = {
+            AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(fg_hex),
+            AppKit.NSFontAttributeName: (
+                AppKit.NSFont.boldSystemFontOfSize_(font_size) if bold
+                else AppKit.NSFont.systemFontOfSize_(font_size)
+            ),
+        }
+        astr = Foundation.NSAttributedString.alloc().initWithString_attributes_(
+            "  " + text + "  ", attrs
+        )
+        pill.setAttributedStringValue_(astr)
+        pill.setWantsLayer_(True)
+        pill.layer().setBackgroundColor_(_hex_to_nscolor(bg_hex).CGColor())
+        pill.layer().setCornerRadius_(h / 2.0)
+        parent.addSubview_(pill)
+        return pill
+
+    def _make_stripe(self, parent, x, y, w, h, color_hex):
+        """Petite barre verticale colorée (pour le côté des alertes)."""
+        v = AppKit.NSView.alloc().initWithFrame_(
+            Foundation.NSMakeRect(x, y, w, h)
+        )
+        v.setWantsLayer_(True)
+        v.layer().setBackgroundColor_(_hex_to_nscolor(color_hex).CGColor())
+        v.layer().setCornerRadius_(w / 2.0)
+        parent.addSubview_(v)
+        return v
 
     # ── Source checkboxes (dynamic) ──
 
@@ -2696,12 +2794,25 @@ class NativePanel:
         if not self._status_field:
             return
         try:
-            if connected:
-                self._status_field.setStringValue_("\u25cf  Connecté à OBS")
-                self._status_field.setTextColor_(_hex_to_nscolor(GREEN))
-            else:
-                self._status_field.setStringValue_("\u25cf  Connexion à OBS…")
-                self._status_field.setTextColor_(_hex_to_nscolor(ORANGE))
+            # Status avec dot coloree integree (couleur differente du texte)
+            dot_color = GREEN if connected else ORANGE
+            txt_color = FG if connected else FG2
+            label     = "Connecté à OBS" if connected else "Connexion à OBS…"
+            attrs_dot = {
+                AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(dot_color),
+                AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(18),
+            }
+            attrs_txt = {
+                AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(txt_color),
+                AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(15),
+            }
+            mstr = Foundation.NSMutableAttributedString.alloc().initWithString_attributes_(
+                "\u25cf  ", attrs_dot
+            )
+            mstr.appendAttributedString_(
+                Foundation.NSAttributedString.alloc().initWithString_attributes_(label, attrs_txt)
+            )
+            self._status_field.setAttributedStringValue_(mstr)
         except Exception as e:
             print(f"[panel.status] {e}")
 
@@ -2758,27 +2869,58 @@ class NativePanel:
             storage.deleteCharactersInRange_(full_range)
 
             if not issues:
-                attrs = {
+                # Etat OK : gros checkmark centre, vert eclatant
+                para = AppKit.NSMutableParagraphStyle.alloc().init()
+                para.setAlignment_(AppKit.NSTextAlignmentCenter)
+                para.setParagraphSpacingBefore_(28.0)
+
+                attrs_emoji = {
                     AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(GREEN),
-                    AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(13),
+                    AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(38),
+                    AppKit.NSParagraphStyleAttributeName: para,
                 }
-                ok_str = Foundation.NSAttributedString.alloc().initWithString_attributes_(
-                    "\u2705  Tout est OK\n", attrs
-                )
-                storage.appendAttributedString_(ok_str)
-            else:
-                for i, issue in enumerate(issues):
-                    attrs = {
-                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(RED),
-                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
-                    }
-                    line = issue + "\n"
-                    if i < len(issues) - 1:
-                        line += "\n"
-                    attr_str = Foundation.NSAttributedString.alloc().initWithString_attributes_(
-                        line, attrs
+                attrs_txt = {
+                    AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(GREEN),
+                    AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(14),
+                    AppKit.NSParagraphStyleAttributeName: para,
+                }
+                storage.appendAttributedString_(
+                    Foundation.NSAttributedString.alloc().initWithString_attributes_(
+                        "\u2705\n", attrs_emoji
                     )
-                    storage.appendAttributedString_(attr_str)
+                )
+                storage.appendAttributedString_(
+                    Foundation.NSAttributedString.alloc().initWithString_attributes_(
+                        "Tout est OK\n", attrs_txt
+                    )
+                )
+            else:
+                # Liste d'alertes : chaque issue avec puce rouge + spacing
+                for i, issue in enumerate(issues):
+                    para = AppKit.NSMutableParagraphStyle.alloc().init()
+                    para.setFirstLineHeadIndent_(6.0)
+                    para.setHeadIndent_(20.0)
+                    para.setParagraphSpacing_(6.0)
+                    attrs_bullet = {
+                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(RED),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.boldSystemFontOfSize_(14),
+                        AppKit.NSParagraphStyleAttributeName: para,
+                    }
+                    attrs_txt = {
+                        AppKit.NSForegroundColorAttributeName: _hex_to_nscolor(FG),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(12),
+                        AppKit.NSParagraphStyleAttributeName: para,
+                    }
+                    storage.appendAttributedString_(
+                        Foundation.NSAttributedString.alloc().initWithString_attributes_(
+                            "\u25cf  ", attrs_bullet
+                        )
+                    )
+                    storage.appendAttributedString_(
+                        Foundation.NSAttributedString.alloc().initWithString_attributes_(
+                            issue + "\n", attrs_txt
+                        )
+                    )
 
             storage.endEditing()
         except Exception as e:
