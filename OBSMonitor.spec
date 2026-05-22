@@ -40,6 +40,8 @@ a = Analysis(
         'websocket',
         'Quartz',
         'Quartz.CoreGraphics',
+        'Quartz.CoreImage',
+        'Quartz.QuartzCore',
         'AppKit',
         'Foundation',
         'PyObjCTools',

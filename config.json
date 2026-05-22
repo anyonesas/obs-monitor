@@ -24,6 +24,7 @@
       "monitor_sources": null
     }
   },
+  "scenes": {},
   "panel": {
     "x": null,
     "y": null
@@ -40,5 +41,16 @@
     "min_duration_s": 10,
     "send_from": "10:00",
     "send_until": "18:30"
+  },
+  "face_switch": {
+    "enabled": false,
+    "camera_source": "",
+    "scene_1p": "",
+    "scene_2p": "",
+    "faces_for_1p": 1,
+    "faces_for_2p": 2,
+    "stable_s": 10,
+    "cooldown_s": 5,
+    "poll_s": 1.0
   }
 }
