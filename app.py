@@ -98,6 +98,23 @@ CONFIG_DIR  = os.path.join(os.path.expanduser("~"), ".config", "obsmonitor")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+PANEL_LOG_PATH = os.path.join(CONFIG_DIR, "panel.log")
+
+def _dlog(msg):
+    """Debug log → fichier panel.log (les print() dans PyInstaller ne sortent
+    nulle part visiblement). Aussi print pour les launches depuis Terminal."""
+    try:
+        import datetime as _dt
+        ts = _dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        line = f"[{ts}] {msg}\n"
+        with open(PANEL_LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(line)
+    except Exception:
+        pass
+    try:
+        print(msg)
+    except Exception:
+        pass
 
 DEFAULT_CONFIG = {
     "obs": {"host": "localhost", "port": 4455, "password": ""},
@@ -2498,7 +2515,7 @@ class NativePanel:
 
     def _rebuild_dynamic(self, audio_names, video_names, cfg, all_scenes=None):
         """Rebuild all content below the fixed header (sources + popups, info, alerts)."""
-        print(f"[panel.rebuild_dynamic] audio={list(audio_names)} video={list(video_names)}")
+        _dlog(f"[panel.rebuild_dynamic] audio={list(audio_names)} video={list(video_names)}")
         doc = self._doc
         cw = self._doc_width
 
@@ -2550,7 +2567,7 @@ class NativePanel:
                 lbl = self._make_label(doc, pad + 14, cy + 4, lbl_w, 20, name, FG, 12, bold=False)
                 self._dynamic_views.append(lbl)
             except Exception as e:
-                print(f"[panel.row.label] {name!r} : {e}")
+                _dlog(f"[panel.row.label] {name!r} : {e}")
 
             # Popup choix scene
             pop_x = pad + 14 + lbl_w + 4
@@ -2559,7 +2576,7 @@ class NativePanel:
                     Foundation.NSMakeRect(pop_x, cy, 142, 26)
                 )
             except Exception as e:
-                print(f"[panel.row.popup_init] {name!r} : {e}")
+                _dlog(f"[panel.row.popup_init] {name!r} : {e}")
                 return (name, None, None)
 
             try:
@@ -2572,7 +2589,7 @@ class NativePanel:
                 try:
                     pop.addItemWithTitle_(title)
                 except Exception as e:
-                    print(f"[panel.row.popup_item] {name!r} {title!r} : {e}")
+                    _dlog(f"[panel.row.popup_item] {name!r} {title!r} : {e}")
 
             # Selection courante
             try:
@@ -2585,7 +2602,7 @@ class NativePanel:
                     if pop.indexOfSelectedItem() < 0:
                         pop.selectItemWithTitle_("Toutes les scènes")
             except Exception as e:
-                print(f"[panel.row.popup_sel] {name!r} : {e}")
+                _dlog(f"[panel.row.popup_sel] {name!r} : {e}")
 
             # Action target — capture name + kind via closure
             target = None
@@ -2598,12 +2615,12 @@ class NativePanel:
                 pop.setTarget_(target)
                 pop.setAction_("action:")
             except Exception as e:
-                print(f"[panel.row.popup_action] {name!r} : {e}")
+                _dlog(f"[panel.row.popup_action] {name!r} : {e}")
 
             try:
                 doc.addSubview_(pop)
             except Exception as e:
-                print(f"[panel.row.popup_add] {name!r} : {e}")
+                _dlog(f"[panel.row.popup_add] {name!r} : {e}")
 
             return (name, pop, target)
 
@@ -2616,7 +2633,7 @@ class NativePanel:
                 try:
                     self._audio_popups.append(_make_source_row(name, "audio", cy))
                 except Exception as e:
-                    print(f"[panel.row] audio {name!r} : {e}")
+                    _dlog(f"[panel.row] audio {name!r} : {e}")
                 cy += 30
         else:
             lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
@@ -2633,7 +2650,7 @@ class NativePanel:
                 try:
                     self._video_popups.append(_make_source_row(name, "video", cy))
                 except Exception as e:
-                    print(f"[panel.row] video {name!r} : {e}")
+                    _dlog(f"[panel.row] video {name!r} : {e}")
                 cy += 30
         else:
             lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
@@ -2812,7 +2829,7 @@ class NativePanel:
         # DIAGNOSTIC v2.5.56 : on retire le check "no change" et on force rebuild
         # systematique tant que le bug "En attente" n'est pas resolu. Coût : un
         # rebuild toutes les 3s.
-        print(f"[panel.refresh] audio={list(audio_names)} video={list(video_names)} "
+        _dlog(f"[panel.refresh] audio={list(audio_names)} video={list(video_names)} "
               f"scene={scene_name!r} all_scenes={all_scenes}")
         # IMPORTANT : on ne marque comme "applique" qu'apres un rebuild reussi.
         # Sinon une exception silencieuse laisse l'UI bloquee a l'etat precedent
@@ -2825,7 +2842,7 @@ class NativePanel:
             self._last_all_scenes = all_scenes
         except Exception as e:
             import traceback
-            print(f"[panel.rebuild] EXCEPTION : {e}")
+            _dlog(f"[panel.rebuild] EXCEPTION : {e}")
             print(traceback.format_exc())
             # On NE met PAS a jour _last_* → la prochaine refresh re-tentera
 
@@ -2840,7 +2857,7 @@ class NativePanel:
             try:
                 self._scene_choice_cb(kind, name, choice)
             except Exception as e:
-                print(f"[panel.scene_choice] {e}")
+                _dlog(f"[panel.scene_choice] {e}")
 
     def set_save_callback(self, callback):
         """(Legacy) Stocke callback ; n'est plus utilise depuis v2.5.52."""
@@ -2898,7 +2915,7 @@ class NativePanel:
             )
             self._status_field.setAttributedStringValue_(mstr)
         except Exception as e:
-            print(f"[panel.status] {e}")
+            _dlog(f"[panel.status] {e}")
 
     def update_info(self, audio_names, video_names, cfg, scene_name=None):
         """Update the 'CE QUI EST SURVEILLÉ' info section."""
@@ -2958,7 +2975,7 @@ class NativePanel:
             storage.appendAttributedString_(astr)
             storage.endEditing()
         except Exception as e:
-            print(f"[panel.info] {e}")
+            _dlog(f"[panel.info] {e}")
 
     def update_issues(self, issues):
         """Update the issue list in the text view."""
@@ -3026,7 +3043,7 @@ class NativePanel:
 
             storage.endEditing()
         except Exception as e:
-            print(f"[panel.issues] {e}")
+            _dlog(f"[panel.issues] {e}")
 
     def notify_update(self, version, url):
         if not self._update_field:
@@ -3035,7 +3052,7 @@ class NativePanel:
             self._update_field.setStringValue_(f"\U0001f504  v{version} disponible")
             self._update_field.setHidden_(False)
         except Exception as e:
-            print(f"[panel.update] {e}")
+            _dlog(f"[panel.update] {e}")
 
     def save_position(self, cfg):
         if not self._panel:
@@ -3051,7 +3068,7 @@ class NativePanel:
             cfg.setdefault("panel", {})["x"] = tk_x
             cfg.setdefault("panel", {})["y"] = tk_y
         except Exception as e:
-            print(f"[panel.save_pos] {e}")
+            _dlog(f"[panel.save_pos] {e}")
 
     def periodic_boost(self):
         if self._panel and self._panel.isVisible():
@@ -4069,7 +4086,7 @@ class OBSMonitorRumps(rumps.App):
                     if name:
                         self._handle_scene_change(name)
                 except Exception as e:
-                    print(f"[scene_event] {e}")
+                    _dlog(f"[scene_event] {e}")
 
             evt.callback.register(on_input_volume_meters)
             evt.callback.register(on_current_program_scene_changed)
@@ -4085,7 +4102,7 @@ class OBSMonitorRumps(rumps.App):
                 cur = req.get_current_program_scene().current_program_scene_name
                 self._handle_scene_change(cur)
             except Exception as e:
-                print(f"[scene_init] {e}")
+                _dlog(f"[scene_init] {e}")
 
             # Découverte immédiate des sources
             try:
@@ -4152,7 +4169,7 @@ class OBSMonitorRumps(rumps.App):
         self._video.set_current_scene(scene_name)
         # Force un refresh du panel pour montrer les sources de la nouvelle scene
         self._last_src_refresh = -999
-        print(f"[scene] {prev!r} -> {scene_name!r}")
+        _dlog(f"[scene] {prev!r} -> {scene_name!r}")
 
     def _on_scene_choice_from_panel(self, kind, source_name, choice):
         """Callback : l'utilisateur a change le dropdown de scope pour une source.
@@ -4171,7 +4188,7 @@ class OBSMonitorRumps(rumps.App):
             spec = choice or "*"
         ss[source_name] = spec
         save_config(self._cfg)
-        print(f"[source_scope] {kind} {source_name!r} -> {spec!r}")
+        _dlog(f"[source_scope] {kind} {source_name!r} -> {spec!r}")
         # MAJ live de l'affichage "ce qui est surveille"
         try:
             audio_names = self._audio.known_inputs()
@@ -4198,13 +4215,13 @@ class OBSMonitorRumps(rumps.App):
                                         self._cfg, self._current_scene,
                                         self._all_scenes)
         except Exception as e:
-            print(f"[src_refresh] panel: {e}")
+            _dlog(f"[src_refresh] panel: {e}")
 
         try:
             self._panel.update_info(audio_names, video_names,
                                     self._cfg, self._current_scene)
         except Exception as e:
-            print(f"[src_refresh] info: {e}")
+            _dlog(f"[src_refresh] info: {e}")
 
     def _sync_checkboxes(self):
         """(Obsolete depuis v2.5.52 — les dropdowns ecrivent directement dans
