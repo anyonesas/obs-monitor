@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.58"
+VERSION      = "2.5.59"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -2558,71 +2558,102 @@ class NativePanel:
             return y + header_h
 
         def _make_source_row(name, kind, cy):
-            """Cree une ligne : label source + popup choix scene. Retourne le popup tuple.
-            Defensive : chaque etape est isolee, un echec ne casse pas la rebuild entiere."""
+            """Cree une ligne : [checkbox] [label source] [popup choix scene].
+            spec '' = checkbox OFF + popup grise
+            spec '*' = checkbox ON + popup "Toutes les scenes"
+            spec '<scene>' = checkbox ON + popup "<scene>" """
             current = source_scenes.get(name, "*")
-            # Label source (toujours, meme si le popup echoue ensuite)
-            lbl_w = max(60, cw - 2*pad - 28 - 150)  # 150px reserve au popup
+            is_active = (current != "")
+
+            cb_x  = pad + 14
+            cb_w  = 22
+            lbl_x = cb_x + cb_w + 6
+            pop_w = 142
+            pop_x = cw - pad - pop_w - 4
+            lbl_w = max(60, pop_x - lbl_x - 6)
+
+            # CHECKBOX actif/inactif
+            cb = None
+            cb_target = None
             try:
-                lbl = self._make_label(doc, pad + 14, cy + 4, lbl_w, 20, name, FG, 12, bold=False)
+                cb = AppKit.NSButton.alloc().initWithFrame_(
+                    Foundation.NSMakeRect(cb_x, cy + 2, cb_w, 22)
+                )
+                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
+                cb.setTitle_("")
+                cb.setState_(AppKit.NSControlStateValueOn if is_active else AppKit.NSControlStateValueOff)
+                doc.addSubview_(cb)
+            except Exception as e:
+                _dlog(f"[panel.row.cb_init] {name!r} : {e}")
+
+            # LABEL source
+            try:
+                lbl = self._make_label(doc, lbl_x, cy + 4, lbl_w, 20, name, FG, 12, bold=False)
                 self._dynamic_views.append(lbl)
             except Exception as e:
                 _dlog(f"[panel.row.label] {name!r} : {e}")
 
-            # Popup choix scene
-            pop_x = pad + 14 + lbl_w + 4
+            # POPUP choix scene
+            pop = None
             try:
                 pop = AppKit.NSPopUpButton.alloc().initWithFrame_(
-                    Foundation.NSMakeRect(pop_x, cy, 142, 26)
+                    Foundation.NSMakeRect(pop_x, cy, pop_w, 26)
                 )
+                pop.setFont_(AppKit.NSFont.systemFontOfSize_(11))
             except Exception as e:
                 _dlog(f"[panel.row.popup_init] {name!r} : {e}")
-                return (name, None, None)
 
-            try:
-                pop.setFont_(AppKit.NSFont.systemFontOfSize_(11))
-            except Exception:
-                pass
-
-            # Items (defensif item par item)
-            for title in (["Toutes les scènes", "Désactivée"] + list(all_scenes)):
+            if pop is not None:
+                for title in (["Toutes les sc\u00e8nes"] + list(all_scenes)):
+                    try:
+                        pop.addItemWithTitle_(title)
+                    except Exception as e:
+                        _dlog(f"[panel.row.popup_item] {name!r} {title!r} : {e}")
                 try:
-                    pop.addItemWithTitle_(title)
+                    if current in ("", "*") or not current:
+                        pop.selectItemWithTitle_("Toutes les sc\u00e8nes")
+                    else:
+                        pop.selectItemWithTitle_(current)
+                        if pop.indexOfSelectedItem() < 0:
+                            pop.selectItemWithTitle_("Toutes les sc\u00e8nes")
+                    pop.setEnabled_(is_active)
                 except Exception as e:
-                    _dlog(f"[panel.row.popup_item] {name!r} {title!r} : {e}")
+                    _dlog(f"[panel.row.popup_sel] {name!r} : {e}")
+                try:
+                    doc.addSubview_(pop)
+                except Exception as e:
+                    _dlog(f"[panel.row.popup_add] {name!r} : {e}")
 
-            # Selection courante
-            try:
-                if current == "":
-                    pop.selectItemWithTitle_("Désactivée")
-                elif current == "*" or not current:
-                    pop.selectItemWithTitle_("Toutes les scènes")
-                else:
-                    pop.selectItemWithTitle_(current)
-                    if pop.indexOfSelectedItem() < 0:
-                        pop.selectItemWithTitle_("Toutes les scènes")
-            except Exception as e:
-                _dlog(f"[panel.row.popup_sel] {name!r} : {e}")
+            # ── Callbacks ──
+            # Checkbox : ON -> "*" (ou scene actuelle si selectionnee dans popup), OFF -> ""
+            if cb is not None:
+                try:
+                    cb_target = _ActionTarget.alloc().init()
+                    cb_target._callback = (
+                        lambda sender, _n=name, _k=kind, _p=pop:
+                        self._on_source_active_toggled(_k, _n, sender, _p)
+                    )
+                    cb.setTarget_(cb_target)
+                    cb.setAction_("action:")
+                except Exception as e:
+                    _dlog(f"[panel.row.cb_action] {name!r} : {e}")
 
-            # Action target — capture name + kind via closure
-            target = None
-            try:
-                target = _ActionTarget.alloc().init()
-                target._callback = (
-                    lambda sender, _n=name, _k=kind:
-                    self._on_scene_choice(_k, _n, sender.titleOfSelectedItem())
-                )
-                pop.setTarget_(target)
-                pop.setAction_("action:")
-            except Exception as e:
-                _dlog(f"[panel.row.popup_action] {name!r} : {e}")
+            # Popup : change scene (uniquement si actif)
+            pop_target = None
+            if pop is not None:
+                try:
+                    pop_target = _ActionTarget.alloc().init()
+                    pop_target._callback = (
+                        lambda sender, _n=name, _k=kind:
+                        self._on_scene_choice(_k, _n, sender.titleOfSelectedItem())
+                    )
+                    pop.setTarget_(pop_target)
+                    pop.setAction_("action:")
+                except Exception as e:
+                    _dlog(f"[panel.row.popup_action] {name!r} : {e}")
 
-            try:
-                doc.addSubview_(pop)
-            except Exception as e:
-                _dlog(f"[panel.row.popup_add] {name!r} : {e}")
-
-            return (name, pop, target)
+            # On garde toutes les refs (cb, pop, targets) pour eviter le GC
+            return (name, pop, (cb, cb_target, pop_target))
 
         # ── Carte SOURCES AUDIO ──
         audio_h = max(28, len(audio_names) * 30 + 4) if audio_names else 28
@@ -2858,6 +2889,31 @@ class NativePanel:
                 self._scene_choice_cb(kind, name, choice)
             except Exception as e:
                 _dlog(f"[panel.scene_choice] {e}")
+
+    def _on_source_active_toggled(self, kind, name, checkbox, popup):
+        """Appele quand la checkbox actif/inactif d'une source est basculee.
+        - ON  → choisit la scene du popup (ou 'Toutes les scenes' si vide)
+        - OFF → desactive (envoie sentinel '__OFF__' au callback)"""
+        try:
+            on = (checkbox.state() == AppKit.NSControlStateValueOn)
+            if on:
+                title = (popup.titleOfSelectedItem() if popup is not None
+                         else "Toutes les scènes")
+                if popup is not None:
+                    try:
+                        popup.setEnabled_(True)
+                    except Exception:
+                        pass
+                self._on_scene_choice(kind, name, title or "Toutes les scènes")
+            else:
+                if popup is not None:
+                    try:
+                        popup.setEnabled_(False)
+                    except Exception:
+                        pass
+                self._on_scene_choice(kind, name, "__OFF__")
+        except Exception as e:
+            _dlog(f"[panel.cb_toggle] {name!r} : {e}")
 
     def set_save_callback(self, callback):
         """(Legacy) Stocke callback ; n'est plus utilise depuis v2.5.52."""
@@ -4181,9 +4237,11 @@ class OBSMonitorRumps(rumps.App):
           "<scene>"  = scene specifique
         """
         ss = self._cfg.setdefault("source_scenes", {})
-        if choice == "Toutes les scènes":
+        if choice == "__OFF__":
+            spec = ""
+        elif choice == "Toutes les scènes":
             spec = "*"
-        elif choice == "Désactivée":
+        elif choice == "Désactivée":  # legacy compat
             spec = ""
         else:
             spec = choice or "*"
@@ -4194,6 +4252,8 @@ class OBSMonitorRumps(rumps.App):
         try:
             audio_names = self._audio.known_inputs()
             video_names = self._video.known_sources()
+            audio_set = set(audio_names)
+            video_names = [v for v in video_names if v not in audio_set]
             self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
         except Exception:
             pass
@@ -4209,6 +4269,11 @@ class OBSMonitorRumps(rumps.App):
 
         audio_names = self._audio.known_inputs()
         video_names = self._video.known_sources()
+        # OBS inclut les sources audio dans les scene_items meme quand elles
+        # n'ont aucun visuel. On filtre pour eviter d'afficher "Micro Salon"
+        # a la fois dans Sources Audio et dans Sources Video.
+        audio_set = set(audio_names)
+        video_names = [v for v in video_names if v not in audio_set]
 
         # Update panel popups (sources + scope) + info
         try:
