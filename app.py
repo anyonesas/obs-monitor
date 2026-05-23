@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.55"
+VERSION      = "2.5.56"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -2498,6 +2498,7 @@ class NativePanel:
 
     def _rebuild_dynamic(self, audio_names, video_names, cfg, all_scenes=None):
         """Rebuild all content below the fixed header (sources + popups, info, alerts)."""
+        print(f"[panel.rebuild_dynamic] audio={list(audio_names)} video={list(video_names)}")
         doc = self._doc
         cw = self._doc_width
 
@@ -2509,8 +2510,8 @@ class NativePanel:
                 pass
         for tup in self._audio_popups + self._video_popups:
             try:
-                tup[1].removeFromSuperview()  # popup
-                # tup[2] = target (just released when list cleared)
+                if tup and len(tup) > 1 and tup[1] is not None:
+                    tup[1].removeFromSuperview()
             except Exception:
                 pass
         self._dynamic_views = []
@@ -2808,12 +2809,9 @@ class NativePanel:
             except Exception:
                 pass
         all_scenes = list(all_scenes or [])
-        if (audio_names == self._last_audio_names
-            and video_names == self._last_video_names
-            and scene_name == self._last_scene
-            and all_scenes == self._last_all_scenes):
-            return  # no change
-        # Diagnostic : log ce qu'on s'apprete a rebuilder
+        # DIAGNOSTIC v2.5.56 : on retire le check "no change" et on force rebuild
+        # systematique tant que le bug "En attente" n'est pas resolu. Coût : un
+        # rebuild toutes les 3s.
         print(f"[panel.refresh] audio={list(audio_names)} video={list(video_names)} "
               f"scene={scene_name!r} all_scenes={all_scenes}")
         # IMPORTANT : on ne marque comme "applique" qu'apres un rebuild reussi.
