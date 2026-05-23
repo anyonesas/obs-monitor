@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.60"
+VERSION      = "2.5.61"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -962,9 +962,27 @@ class VideoMonitor:
             return
         try:
             scene = client.get_current_program_scene().current_program_scene_name
-            items = client.get_scene_item_list(scene).scene_items
+            raw_items = client.get_scene_item_list(scene).scene_items
         except Exception:
             return
+
+        # OBS retourne les items du top-level. Si un item est un Groupe,
+        # on doit ouvrir le groupe pour voir ses enfants.
+        items = []
+        for it in raw_items:
+            if not it.get("sceneItemEnabled", True):
+                continue
+            if it.get("isGroup"):
+                try:
+                    group_name = it.get("sourceName", "")
+                    children = client.get_group_scene_item_list(group_name).scene_items
+                    for ch in children:
+                        if ch.get("sceneItemEnabled", True):
+                            items.append(ch)
+                except Exception:
+                    pass
+            else:
+                items.append(it)
 
         # Track la scene OBS active pour le filtrage par scene
         with self._lock:
@@ -977,8 +995,6 @@ class VideoMonitor:
         max_faces_this_tick = 0
 
         for item in items:
-            if not item.get("sceneItemEnabled", True):
-                continue
             src = item.get("sourceName", "")
             if not src:
                 continue
