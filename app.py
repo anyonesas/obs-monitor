@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.54"
+VERSION      = "2.5.55"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -2540,45 +2540,70 @@ class NativePanel:
             return y + header_h
 
         def _make_source_row(name, kind, cy):
-            """Cree une ligne : label source + popup choix scene. Retourne le popup tuple."""
+            """Cree une ligne : label source + popup choix scene. Retourne le popup tuple.
+            Defensive : chaque etape est isolee, un echec ne casse pas la rebuild entiere."""
             current = source_scenes.get(name, "*")
-            # Label source
-            lbl_w = cw - 2*pad - 28 - 150  # 150px reserve au popup
-            lbl = self._make_label(doc, pad + 14, cy + 4, lbl_w, 20, name, FG, 12, bold=False)
-            self._dynamic_views.append(lbl)
+            # Label source (toujours, meme si le popup echoue ensuite)
+            lbl_w = max(60, cw - 2*pad - 28 - 150)  # 150px reserve au popup
+            try:
+                lbl = self._make_label(doc, pad + 14, cy + 4, lbl_w, 20, name, FG, 12, bold=False)
+                self._dynamic_views.append(lbl)
+            except Exception as e:
+                print(f"[panel.row.label] {name!r} : {e}")
+
             # Popup choix scene
             pop_x = pad + 14 + lbl_w + 4
-            pop = AppKit.NSPopUpButton.alloc().initWithFrame_(
-                Foundation.NSMakeRect(pop_x, cy, 142, 26)
-            )
             try:
-                pop.setBezelStyle_(AppKit.NSBezelStyleRounded)
+                pop = AppKit.NSPopUpButton.alloc().initWithFrame_(
+                    Foundation.NSMakeRect(pop_x, cy, 142, 26)
+                )
+            except Exception as e:
+                print(f"[panel.row.popup_init] {name!r} : {e}")
+                return (name, None, None)
+
+            try:
+                pop.setFont_(AppKit.NSFont.systemFontOfSize_(11))
             except Exception:
-                pass  # bezel style n'est pas toujours applicable a NSPopUpButton
-            pop.setFont_(AppKit.NSFont.systemFontOfSize_(11))
-            pop.addItemWithTitle_("Toutes les scènes")
-            pop.addItemWithTitle_("Désactivée")
-            pop.menu().addItem_(AppKit.NSMenuItem.separatorItem())
-            for s in all_scenes:
-                pop.addItemWithTitle_(s)
-            # Selectionne l'item courant
-            if current == "":
-                pop.selectItemWithTitle_("Désactivée")
-            elif current == "*" or not current:
-                pop.selectItemWithTitle_("Toutes les scènes")
-            else:
-                pop.selectItemWithTitle_(current)
-                if pop.indexOfSelectedItem() < 0:
+                pass
+
+            # Items (defensif item par item)
+            for title in (["Toutes les scènes", "Désactivée"] + list(all_scenes)):
+                try:
+                    pop.addItemWithTitle_(title)
+                except Exception as e:
+                    print(f"[panel.row.popup_item] {name!r} {title!r} : {e}")
+
+            # Selection courante
+            try:
+                if current == "":
+                    pop.selectItemWithTitle_("Désactivée")
+                elif current == "*" or not current:
                     pop.selectItemWithTitle_("Toutes les scènes")
+                else:
+                    pop.selectItemWithTitle_(current)
+                    if pop.indexOfSelectedItem() < 0:
+                        pop.selectItemWithTitle_("Toutes les scènes")
+            except Exception as e:
+                print(f"[panel.row.popup_sel] {name!r} : {e}")
+
             # Action target — capture name + kind via closure
-            target = _ActionTarget.alloc().init()
-            target._callback = (
-                lambda sender, _n=name, _k=kind:
-                self._on_scene_choice(_k, _n, sender.titleOfSelectedItem())
-            )
-            pop.setTarget_(target)
-            pop.setAction_("action:")
-            doc.addSubview_(pop)
+            target = None
+            try:
+                target = _ActionTarget.alloc().init()
+                target._callback = (
+                    lambda sender, _n=name, _k=kind:
+                    self._on_scene_choice(_k, _n, sender.titleOfSelectedItem())
+                )
+                pop.setTarget_(target)
+                pop.setAction_("action:")
+            except Exception as e:
+                print(f"[panel.row.popup_action] {name!r} : {e}")
+
+            try:
+                doc.addSubview_(pop)
+            except Exception as e:
+                print(f"[panel.row.popup_add] {name!r} : {e}")
+
             return (name, pop, target)
 
         # ── Carte SOURCES AUDIO ──
@@ -2788,6 +2813,9 @@ class NativePanel:
             and scene_name == self._last_scene
             and all_scenes == self._last_all_scenes):
             return  # no change
+        # Diagnostic : log ce qu'on s'apprete a rebuilder
+        print(f"[panel.refresh] audio={list(audio_names)} video={list(video_names)} "
+              f"scene={scene_name!r} all_scenes={all_scenes}")
         # IMPORTANT : on ne marque comme "applique" qu'apres un rebuild reussi.
         # Sinon une exception silencieuse laisse l'UI bloquee a l'etat precedent
         # (= placeholder "En attente") pour toutes les refresh suivantes.
