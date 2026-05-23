@@ -91,7 +91,7 @@ app = BUNDLE(
     bundle_identifier='com.obsmonitor.app',
     info_plist={
         'NSHighResolutionCapable': True,
-        'CFBundleShortVersionString': '2.5.52',
+        'CFBundleShortVersionString': '2.5.53',
         'CFBundleName': 'OBS Monitor',
         'CFBundleDisplayName': 'OBS Monitor',
     },

@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.52"
+VERSION      = "2.5.53"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -2616,7 +2616,7 @@ class NativePanel:
 
         # ── Carte SURVEILLANCE ──
         survey_h = 90
-        content_y, _ = _make_section_card("🔍", "SURVEILLANCE", CYAN, survey_h)
+        content_y = _make_section_card("🔍", "SURVEILLANCE", CYAN, survey_h)
         self._info_field = AppKit.NSTextView.alloc().initWithFrame_(
             Foundation.NSMakeRect(pad + 14, content_y, cw - 2*pad - 28, survey_h - 4)
         )
@@ -2632,7 +2632,7 @@ class NativePanel:
 
         # ── Carte ALERTES ──
         alerts_h = 240
-        content_y, _ = _make_section_card("⚠️", "ALERTES", RED, alerts_h)
+        content_y = _make_section_card("⚠️", "ALERTES", RED, alerts_h)
         self._text_view = AppKit.NSTextView.alloc().initWithFrame_(
             Foundation.NSMakeRect(pad + 14, content_y, cw - 2*pad - 28, alerts_h - 4)
         )
