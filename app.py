@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.53"
+VERSION      = "2.5.54"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -2551,7 +2551,10 @@ class NativePanel:
             pop = AppKit.NSPopUpButton.alloc().initWithFrame_(
                 Foundation.NSMakeRect(pop_x, cy, 142, 26)
             )
-            pop.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            try:
+                pop.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            except Exception:
+                pass  # bezel style n'est pas toujours applicable a NSPopUpButton
             pop.setFont_(AppKit.NSFont.systemFontOfSize_(11))
             pop.addItemWithTitle_("Toutes les scènes")
             pop.addItemWithTitle_("Désactivée")
@@ -2584,7 +2587,10 @@ class NativePanel:
         if audio_names:
             cy = content_y
             for name in audio_names:
-                self._audio_popups.append(_make_source_row(name, "audio", cy))
+                try:
+                    self._audio_popups.append(_make_source_row(name, "audio", cy))
+                except Exception as e:
+                    print(f"[panel.row] audio {name!r} : {e}")
                 cy += 30
         else:
             lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
@@ -2598,7 +2604,10 @@ class NativePanel:
         if video_names:
             cy = content_y
             for name in video_names:
-                self._video_popups.append(_make_source_row(name, "video", cy))
+                try:
+                    self._video_popups.append(_make_source_row(name, "video", cy))
+                except Exception as e:
+                    print(f"[panel.row] video {name!r} : {e}")
                 cy += 30
         else:
             lbl = self._make_label(doc, pad + 18, content_y + 4, cw - 2*pad - 36, 18,
@@ -2779,11 +2788,20 @@ class NativePanel:
             and scene_name == self._last_scene
             and all_scenes == self._last_all_scenes):
             return  # no change
-        self._last_audio_names = list(audio_names)
-        self._last_video_names = list(video_names)
-        self._last_scene = scene_name
-        self._last_all_scenes = all_scenes
-        self._rebuild_dynamic(audio_names, video_names, cfg, all_scenes)
+        # IMPORTANT : on ne marque comme "applique" qu'apres un rebuild reussi.
+        # Sinon une exception silencieuse laisse l'UI bloquee a l'etat precedent
+        # (= placeholder "En attente") pour toutes les refresh suivantes.
+        try:
+            self._rebuild_dynamic(audio_names, video_names, cfg, all_scenes)
+            self._last_audio_names = list(audio_names)
+            self._last_video_names = list(video_names)
+            self._last_scene = scene_name
+            self._last_all_scenes = all_scenes
+        except Exception as e:
+            import traceback
+            print(f"[panel.rebuild] EXCEPTION : {e}")
+            print(traceback.format_exc())
+            # On NE met PAS a jour _last_* → la prochaine refresh re-tentera
 
     def set_scene_choice_callback(self, cb):
         """Stocke le callback appele quand l'utilisateur change le dropdown
@@ -4141,7 +4159,7 @@ class OBSMonitorRumps(rumps.App):
     def _refresh_sources(self):
         """Discover OBS sources and refresh panel checkboxes + info."""
         now = time.time()
-        if now - self._last_src_refresh < 10:
+        if now - self._last_src_refresh < 3:
             return
         self._last_src_refresh = now
 
