@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.61"
+VERSION      = "2.5.62"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -185,11 +185,14 @@ DEFAULT_CONFIG = {
     #   { "Nom scene": { "audio": ["Micro 1"], "video": ["Cam Wide"] } }
     "scenes": {},
     # Nouveau (v2.5.52+) : portee de surveillance par source.
-    #   { "Nom source": "*" | "" | "<scene>" }
+    # Splittee en audio/video (v2.5.62+) car une meme source (Blackmagic, etc.)
+    # peut etre a la fois audio et video et necessiter un controle independant.
     #   "*"        = toutes scenes (defaut si absent)
     #   ""         = desactivee (jamais surveillee)
     #   "<scene>"  = surveillee uniquement quand cette scene est active
-    "source_scenes": {},
+    "source_scenes": {},          # legacy fallback (lu si pas d'entree dans audio/video)
+    "audio_source_scenes": {},    # specifique audio (v2.5.62+)
+    "video_source_scenes": {},    # specifique video (v2.5.62+)
 }
 
 def _bundled_config():
@@ -240,6 +243,8 @@ def load_config():
             c["scene_switch"].setdefault(k, v)
     c.setdefault("scenes", {})
     c.setdefault("source_scenes", {})
+    c.setdefault("audio_source_scenes", {})
+    c.setdefault("video_source_scenes", {})
     return c
 
 def save_config(cfg):
@@ -707,14 +712,19 @@ class AudioMonitor:
         # Selection par scene OBS
         self._current_scene = None   # nom scene OBS active
         self._scenes_cfg    = {}     # legacy : cfg["scenes"][scene]["audio"]
-        self._source_scenes = {}     # nouveau : cfg["source_scenes"][name] = "*" | "" | "<scene>"
+        self._source_scenes = {}     # legacy : cfg["source_scenes"]
+        self._kind_source_scenes = {} # nouveau v2.5.62+ : cfg["audio_source_scenes"]
         # {name: {peak_db, last_sound_t, buf: deque[float]}}
 
     def set_scenes_cfg(self, scenes_cfg):
         self._scenes_cfg = scenes_cfg
 
-    def set_source_scenes(self, source_scenes):
+    def set_source_scenes(self, source_scenes, kind_source_scenes=None):
+        """Old: source_scenes (legacy). New: kind_source_scenes (audio-specific).
+        Audio monitor prefers kind_source_scenes if a key exists, else falls back."""
         self._source_scenes = source_scenes
+        if kind_source_scenes is not None:
+            self._kind_source_scenes = kind_source_scenes
 
     def set_current_scene(self, name):
         with self._lock:
@@ -723,7 +733,15 @@ class AudioMonitor:
     def _is_monitored(self, name):
         """True si la source `name` doit etre surveillee sur la scene courante."""
         cs = self._current_scene
-        # 1) Priorite au nouveau modele per-source
+        # 1) Priorite : nouveau modele per-source-per-kind (audio_source_scenes)
+        if name in self._kind_source_scenes:
+            spec = self._kind_source_scenes[name]
+            if spec == "":
+                return False
+            if spec == "*":
+                return True
+            return spec == cs
+        # 2) Legacy v2.5.52 : per-source generique
         if name in self._source_scenes:
             spec = self._source_scenes[name]
             if spec == "":
@@ -911,13 +929,16 @@ class VideoMonitor:
         # Selection par scene OBS
         self._current_scene = None
         self._scenes_cfg    = {}
-        self._source_scenes = {}     # nouveau v2.5.52+
+        self._source_scenes = {}     # legacy v2.5.52
+        self._kind_source_scenes = {} # nouveau v2.5.62+ : video_source_scenes
 
     def set_scenes_cfg(self, scenes_cfg):
         self._scenes_cfg = scenes_cfg
 
-    def set_source_scenes(self, source_scenes):
+    def set_source_scenes(self, source_scenes, kind_source_scenes=None):
         self._source_scenes = source_scenes
+        if kind_source_scenes is not None:
+            self._kind_source_scenes = kind_source_scenes
 
     def set_current_scene(self, name):
         with self._lock:
@@ -926,6 +947,15 @@ class VideoMonitor:
     def _is_monitored(self, name):
         """True si la source video `name` doit etre surveillee sur la scene courante."""
         cs = self._current_scene
+        # 1) Priorite : nouveau modele per-source-per-kind (video_source_scenes)
+        if name in self._kind_source_scenes:
+            spec = self._kind_source_scenes[name]
+            if spec == "":
+                return False
+            if spec == "*":
+                return True
+            return spec == cs
+        # 2) Legacy v2.5.52 : per-source generique
         if name in self._source_scenes:
             spec = self._source_scenes[name]
             if spec == "":
@@ -967,17 +997,32 @@ class VideoMonitor:
             return
 
         # OBS retourne les items du top-level. Si un item est un Groupe,
-        # on doit ouvrir le groupe pour voir ses enfants.
+        # on doit ouvrir le groupe pour voir ses enfants. On filtre aussi
+        # les sources audio-only (mic) qui sont parfois ajoutees comme
+        # scene_items mais n'ont aucun visuel a surveiller.
+        AUDIO_ONLY_KINDS = (
+            "coreaudio_input_capture", "coreaudio_output_capture",
+            "wasapi_input_capture", "wasapi_output_capture",
+            "wasapi_process_output_capture",
+            "alsa_input_capture", "pulse_input_capture", "pulse_output_capture",
+        )
+        def _is_audio_only(it):
+            k = it.get("inputKind", "") or ""
+            return any(k.startswith(a) for a in AUDIO_ONLY_KINDS)
+
         items = []
         for it in raw_items:
             if not it.get("sceneItemEnabled", True):
+                continue
+            if _is_audio_only(it):
                 continue
             if it.get("isGroup"):
                 try:
                     group_name = it.get("sourceName", "")
                     children = client.get_group_scene_item_list(group_name).scene_items
                     for ch in children:
-                        if ch.get("sceneItemEnabled", True):
+                        if (ch.get("sceneItemEnabled", True)
+                            and not _is_audio_only(ch)):
                             items.append(ch)
                 except Exception:
                     pass
@@ -2555,9 +2600,22 @@ class NativePanel:
         pad = 14
         all_scenes = list(all_scenes or [])
 
-        source_scenes = {}
+        legacy_scenes = {}
+        audio_scenes  = {}
+        video_scenes  = {}
         if cfg:
-            source_scenes = cfg.get("source_scenes", {}) or {}
+            legacy_scenes = cfg.get("source_scenes", {}) or {}
+            audio_scenes  = cfg.get("audio_source_scenes", {}) or {}
+            video_scenes  = cfg.get("video_source_scenes", {}) or {}
+
+        def _current_spec(name, kind):
+            """Resolve spec for (name, kind) : audio/video-specific then legacy."""
+            d = audio_scenes if kind == "audio" else video_scenes
+            if name in d:
+                return d[name]
+            if name in legacy_scenes:
+                return legacy_scenes[name]
+            return "*"
 
         def _make_section_card(title_emoji, title_text, title_color, contents_height):
             """Crée une section card avec header (emoji + titre) et renvoie y_content_start."""
@@ -2578,7 +2636,7 @@ class NativePanel:
             spec '' = checkbox OFF + popup grise
             spec '*' = checkbox ON + popup "Toutes les scenes"
             spec '<scene>' = checkbox ON + popup "<scene>" """
-            current = source_scenes.get(name, "*")
+            current = _current_spec(name, kind)
             is_active = (current != "")
 
             cb_x  = pad + 14
@@ -2996,34 +3054,27 @@ class NativePanel:
         try:
             acfg = cfg["checks"]["audio"]
             vcfg = cfg["checks"]["video"]
-            source_scenes = cfg.get("source_scenes", {}) or {}
+            legacy_scenes = cfg.get("source_scenes", {}) or {}
+            audio_scenes  = cfg.get("audio_source_scenes", {}) or {}
+            video_scenes  = cfg.get("video_source_scenes", {}) or {}
 
-            def _is_monitored_now(name):
-                """Reproduit la logique des monitors pour afficher ce qui est actif."""
-                if name in source_scenes:
-                    spec = source_scenes[name]
-                    if spec == "":
-                        return False
-                    if spec == "*":
-                        return True
-                    return spec == scene_name
-                # Legacy
-                if scene_name and scene_name in cfg.get("scenes", {}):
-                    sc = cfg["scenes"][scene_name]
-                    if name in (audio_names or []) and sc.get("audio") is not None:
-                        return name in sc["audio"]
-                    if name in (video_names or []) and sc.get("video") is not None:
-                        return name in sc["video"]
-                if name in (audio_names or []):
-                    mon = acfg.get("monitor_inputs")
-                    return mon is None or name in mon
-                if name in (video_names or []):
-                    mon = vcfg.get("monitor_sources")
-                    return mon is None or name in mon
+            def _check_spec(spec):
+                if spec == "":
+                    return False
+                if spec == "*":
+                    return True
+                return spec == scene_name
+
+            def _is_active(name, kind):
+                d = audio_scenes if kind == "audio" else video_scenes
+                if name in d:
+                    return _check_spec(d[name])
+                if name in legacy_scenes:
+                    return _check_spec(legacy_scenes[name])
                 return True
 
-            a_active = [n for n in (audio_names or []) if _is_monitored_now(n)]
-            v_active = [n for n in (video_names or []) if _is_monitored_now(n)]
+            a_active = [n for n in (audio_names or []) if _is_active(n, "audio")]
+            v_active = [n for n in (video_names or []) if _is_active(n, "video")]
             a_str = ", ".join(a_active) if a_active else "(aucune)"
             v_str = ", ".join(v_active) if v_active else "(aucune)"
 
@@ -3701,10 +3752,13 @@ class OBSMonitorRumps(rumps.App):
         self._scenes_cfg = self._cfg.setdefault("scenes", {})
         self._audio.set_scenes_cfg(self._scenes_cfg)
         self._video.set_scenes_cfg(self._scenes_cfg)
-        # Nouveau (v2.5.52+) : portee par source (dropdown UI)
+        # v2.5.52 : portee par source (legacy fallback)
         self._source_scenes = self._cfg.setdefault("source_scenes", {})
-        self._audio.set_source_scenes(self._source_scenes)
-        self._video.set_source_scenes(self._source_scenes)
+        # v2.5.62 : per-source-per-kind (audio et video independants)
+        self._audio_source_scenes = self._cfg.setdefault("audio_source_scenes", {})
+        self._video_source_scenes = self._cfg.setdefault("video_source_scenes", {})
+        self._audio.set_source_scenes(self._source_scenes, self._audio_source_scenes)
+        self._video.set_source_scenes(self._source_scenes, self._video_source_scenes)
         self._current_scene = None
         self._all_scenes = []   # liste des scenes OBS (peuplee dans _connect)
 
@@ -4267,7 +4321,9 @@ class OBSMonitorRumps(rumps.App):
           ""         = desactivee
           "<scene>"  = scene specifique
         """
-        ss = self._cfg.setdefault("source_scenes", {})
+        # v2.5.62 : ecriture dans la dict specifique au kind (audio ou video)
+        key = "audio_source_scenes" if kind == "audio" else "video_source_scenes"
+        ss = self._cfg.setdefault(key, {})
         if choice == "__OFF__":
             spec = ""
         elif choice == "Toutes les scènes":
@@ -4283,8 +4339,6 @@ class OBSMonitorRumps(rumps.App):
         try:
             audio_names = self._audio.known_inputs()
             video_names = self._video.known_sources()
-            audio_set = set(audio_names)
-            video_names = [v for v in video_names if v not in audio_set]
             self._panel.update_info(audio_names, video_names, self._cfg, self._current_scene)
         except Exception:
             pass
@@ -4317,11 +4371,9 @@ class OBSMonitorRumps(rumps.App):
 
         audio_names = self._audio.known_inputs()
         video_names = self._video.known_sources()
-        # OBS inclut les sources audio dans les scene_items meme quand elles
-        # n'ont aucun visuel. On filtre pour eviter d'afficher "Micro Salon"
-        # a la fois dans Sources Audio et dans Sources Video.
-        audio_set = set(audio_names)
-        video_names = [v for v in video_names if v not in audio_set]
+        # Note : un meme nom peut apparaitre dans les deux listes (Blackmagic
+        # capture card avec audio embarque). Les 2 sont reglees independamment
+        # via cfg["audio_source_scenes"] et cfg["video_source_scenes"].
 
         # Update panel popups (sources + scope) + info
         try:
