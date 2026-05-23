@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.59"
+VERSION      = "2.5.60"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -4161,6 +4161,21 @@ class OBSMonitorRumps(rumps.App):
             except Exception as e:
                 _dlog(f"[scene_init] {e}")
 
+            # Liste complete des scenes OBS (pour les dropdowns du panel)
+            try:
+                sl = req.get_scene_list()
+                names = []
+                for s in (sl.scenes or []):
+                    if isinstance(s, dict):
+                        n = s.get("sceneName") or s.get("scene_name") or s.get("name")
+                        if n:
+                            names.append(n)
+                self._all_scenes = names
+                _dlog(f"[scenes] all_scenes = {names}")
+            except Exception as e:
+                _dlog(f"[scenes] get_scene_list error : {e}")
+                self._all_scenes = []
+
             # Découverte immédiate des sources
             try:
                 inp_list = req.get_input_list()
@@ -4266,6 +4281,23 @@ class OBSMonitorRumps(rumps.App):
         if now - self._last_src_refresh < 3:
             return
         self._last_src_refresh = now
+
+        # Refetch scene list (peut avoir change : scene ajoutee/supprimee/renommee)
+        try:
+            req = self._get_req()
+            if req:
+                sl = req.get_scene_list()
+                names = []
+                for s in (sl.scenes or []):
+                    if isinstance(s, dict):
+                        n = s.get("sceneName") or s.get("scene_name") or s.get("name")
+                        if n:
+                            names.append(n)
+                if names and names != self._all_scenes:
+                    _dlog(f"[scenes] update : {self._all_scenes} -> {names}")
+                    self._all_scenes = names
+        except Exception as e:
+            _dlog(f"[scenes_refresh] {e}")
 
         audio_names = self._audio.known_inputs()
         video_names = self._video.known_sources()
