@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.57"
+VERSION      = "2.5.58"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -3634,6 +3634,7 @@ class OBSMonitorRumps(rumps.App):
         self._audio.set_source_scenes(self._source_scenes)
         self._video.set_source_scenes(self._source_scenes)
         self._current_scene = None
+        self._all_scenes = []   # liste des scenes OBS (peuplee dans _connect)
 
         # SMS notifier — partage le dict de config (modifs propagées en direct)
         if "sms" not in self._cfg:
