@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.62"
+VERSION      = "2.5.63"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -4169,12 +4169,71 @@ class OBSMonitorRumps(rumps.App):
         self._video.start()
         threading.Thread(target=self._conn_loop, daemon=True).start()
 
-        # La voix ne démarre JAMAIS automatiquement — l'utilisateur l'active manuellement
-        # (évite la surprise d'une écoute active à chaque lancement)
+        # Shortcut global Cmd+1 → toggle enregistrement OBS
+        self._setup_record_hotkey()
 
         self._schedule_on_main(5.0, self._check_update_bg_wrapper)
         self._schedule_on_main(4.0, self._check_and_request_permissions)
         self._schedule_on_main(3.0, self._write_debug_log)
+
+    def _setup_record_hotkey(self):
+        """Ecoute Cmd+1 (keyCode 18 = touche "1/&") via NSEvent
+        global + local monitor → toggle l'enregistrement OBS."""
+        if not HAVE_APPKIT:
+            return
+        try:
+            mask = AppKit.NSEventMaskKeyDown
+
+            def _handler(event):
+                try:
+                    flags = event.modifierFlags()
+                    kc = event.keyCode()
+                    if (flags & AppKit.NSEventModifierFlagCommand) and kc == 18:
+                        # Sur main thread pour Notif Center
+                        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                            self._toggle_record_via_obs
+                        )
+                except Exception as e:
+                    _dlog(f"[hotkey] {e}")
+                return event  # ne pas consommer (event traverse normalement)
+
+            # Global : evenements quand OBS Monitor n'est PAS focus
+            self._hotkey_global = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                mask, _handler
+            )
+            # Local : evenements quand OBS Monitor est focus
+            self._hotkey_local = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                mask, _handler
+            )
+            _dlog("[hotkey] Cmd+1 → toggle record actif")
+        except Exception as e:
+            _dlog(f"[hotkey.setup] {e}")
+
+    def _toggle_record_via_obs(self):
+        """Bascule l'enregistrement OBS via WebSocket. Notification de feedback."""
+        req = self._get_req()
+        if not req:
+            rumps.notification("OBS Monitor", "", "OBS non connecté", sound=False)
+            return
+        try:
+            res = req.toggle_record()
+            active = getattr(res, "output_active", None)
+            if active is None:
+                # OBS WS v5 : toggle_record peut ne pas retourner outputActive
+                # On relit l'etat
+                try:
+                    status = req.get_record_status()
+                    active = getattr(status, "output_active", None)
+                except Exception:
+                    pass
+            msg = ("🔴 Enregistrement démarré" if active
+                   else "⏹ Enregistrement arrêté")
+            rumps.notification("OBS Monitor", "", msg, sound=False)
+            _dlog(f"[hotkey.record] toggle → active={active}")
+        except Exception as e:
+            _dlog(f"[hotkey.record] {e}")
+            rumps.notification("OBS Monitor", "",
+                               f"Erreur enregistrement : {e}", sound=False)
 
     def _schedule_on_main(self, delay, func):
         def _wrapper():
