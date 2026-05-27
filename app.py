@@ -1487,16 +1487,16 @@ class SMSNotifier:
             try:
                 with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
                     resp = r.read().decode("utf-8", errors="replace")[:300]
-                    _dlog(f"[sms] {r.status} → {message[:60]}  | {resp[:120]}"))
+                    _dlog(f"[sms] {r.status} → {message[:60]}  | {resp[:120]}")
             except urllib.error.HTTPError as he:
                 err_body = ""
                 try:
                     err_body = he.read().decode("utf-8", errors="replace")[:300]
                 except Exception:
                     pass
-                _dlog(f"[sms] HTTP {he.code} → {err_body}"))
+                _dlog(f"[sms] HTTP {he.code} → {err_body}")
         except Exception as e:
-            _dlog(f"[sms] erreur envoi: {e}"))
+            _dlog(f"[sms] erreur envoi: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
