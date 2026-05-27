@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.65"
+VERSION      = "2.5.66"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -229,14 +229,28 @@ def load_config():
         for k, v in DEFAULT_CONFIG["sms"].items():
             c["sms"].setdefault(k, v)
         # v2.5.64 : migration sms8 → Anyone Relay. Si l'ancien api_key sms8 est
-        # detecte (40 hex chars sans prefix uk_), on le remet a zero pour eviter
-        # qu'il soit envoye au mauvais endpoint. L'user reconfigure via le menu.
+        # detecte (sans prefix uk_), on tente de le remplacer par la cle Relay
+        # bundlee dans le .app. Sinon reset + disable.
         s = c["sms"]
         if s.get("api_key") and not s["api_key"].startswith("uk_"):
-            _dlog(f"[sms] legacy sms8 api_key detecte, reset pour Relay")
-            s["api_key"] = ""
-            s.pop("device", None)
-            s["enabled"] = False
+            try:
+                bundled_sms = _bundled_config().get("sms", {})
+                bundled_key = (bundled_sms.get("api_key") or "")
+            except Exception:
+                bundled_key = ""
+            if bundled_key.startswith("uk_"):
+                s["api_key"]          = bundled_key
+                s["phone_gateway_id"] = bundled_sms.get("phone_gateway_id", "")
+                s["relay_base_url"]   = bundled_sms.get(
+                    "relay_base_url", "https://sms-01.anyone-internal.com"
+                )
+                s.pop("device", None)
+                _dlog(f"[sms] legacy sms8 key remplacee par cle Relay bundlee")
+            else:
+                s["api_key"] = ""
+                s.pop("device", None)
+                s["enabled"] = False
+                _dlog(f"[sms] legacy sms8 key reset (pas de cle bundlee)")
     # Banner defaults
     if "banner" not in c:
         c["banner"] = dict(DEFAULT_CONFIG["banner"])
