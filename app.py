@@ -233,7 +233,7 @@ def load_config():
         # qu'il soit envoye au mauvais endpoint. L'user reconfigure via le menu.
         s = c["sms"]
         if s.get("api_key") and not s["api_key"].startswith("uk_"):
-            print(f"[sms] legacy sms8 api_key detecte, reset pour Relay")
+            _dlog(f"[sms] legacy sms8 api_key detecte, reset pour Relay"))
             s["api_key"] = ""
             s.pop("device", None)
             s["enabled"] = False
@@ -1487,16 +1487,16 @@ class SMSNotifier:
             try:
                 with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
                     resp = r.read().decode("utf-8", errors="replace")[:300]
-                    print(f"[sms] {r.status} → {message[:60]}  | {resp[:120]}")
+                    _dlog(f"[sms] {r.status} → {message[:60]}  | {resp[:120]}"))
             except urllib.error.HTTPError as he:
                 err_body = ""
                 try:
                     err_body = he.read().decode("utf-8", errors="replace")[:300]
                 except Exception:
                     pass
-                print(f"[sms] HTTP {he.code} → {err_body}")
+                _dlog(f"[sms] HTTP {he.code} → {err_body}"))
         except Exception as e:
-            print(f"[sms] erreur envoi: {e}")
+            _dlog(f"[sms] erreur envoi: {e}"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
