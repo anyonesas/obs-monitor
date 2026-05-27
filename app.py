@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.64"
+VERSION      = "2.5.65"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -233,7 +233,7 @@ def load_config():
         # qu'il soit envoye au mauvais endpoint. L'user reconfigure via le menu.
         s = c["sms"]
         if s.get("api_key") and not s["api_key"].startswith("uk_"):
-            _dlog(f"[sms] legacy sms8 api_key detecte, reset pour Relay"))
+            _dlog(f"[sms] legacy sms8 api_key detecte, reset pour Relay")
             s["api_key"] = ""
             s.pop("device", None)
             s["enabled"] = False
