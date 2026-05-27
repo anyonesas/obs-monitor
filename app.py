@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.63"
+VERSION      = "2.5.64"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -164,14 +164,17 @@ DEFAULT_CONFIG = {
         "active_days": "lun,mar,mer,jeu,ven,sam,dim",
     },
     "sms": {
+        # v2.5.64+ : envoi via Anyone SMS Relay (sms-01.anyone-internal.com)
+        # au lieu de sms8.io. Auth Bearer avec une cle uk_xxx.
         "enabled": False,
-        "api_key": "",
-        "device": "",            # ex: "9210|0"
-        "recipient": "",         # ex: "+33632548891"
-        "cooldown_s": 600,       # 10 min entre SMS pour la même erreur
-        "min_duration_s": 30,    # erreur doit durer 30s avant SMS (rouge 10s + 30s de vrai silence)
-        "send_from": "10:00",    # heure de début d'envoi
-        "send_until": "18:30",   # heure de fin d'envoi
+        "api_key": "",               # uk_xxx... (bearer token Upstream)
+        "phone_gateway_id": "",      # pgw_xxx (vide = auto-selection)
+        "relay_base_url": "https://sms-01.anyone-internal.com",
+        "recipient": "",             # ex: "+33632548891"
+        "cooldown_s": 600,           # 10 min entre SMS pour la même erreur
+        "min_duration_s": 30,        # erreur doit durer 30s avant SMS
+        "send_from": "10:00",
+        "send_until": "18:30",
         "days": "lun,mar,mer,jeu,ven,sam,dim",
     },
     "scene_switch": {
@@ -225,6 +228,15 @@ def load_config():
     else:
         for k, v in DEFAULT_CONFIG["sms"].items():
             c["sms"].setdefault(k, v)
+        # v2.5.64 : migration sms8 → Anyone Relay. Si l'ancien api_key sms8 est
+        # detecte (40 hex chars sans prefix uk_), on le remet a zero pour eviter
+        # qu'il soit envoye au mauvais endpoint. L'user reconfigure via le menu.
+        s = c["sms"]
+        if s.get("api_key") and not s["api_key"].startswith("uk_"):
+            print(f"[sms] legacy sms8 api_key detecte, reset pour Relay")
+            s["api_key"] = ""
+            s.pop("device", None)
+            s["enabled"] = False
     # Banner defaults
     if "banner" not in c:
         c["banner"] = dict(DEFAULT_CONFIG["banner"])
@@ -1327,22 +1339,20 @@ class VideoMonitor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SMSNotifier — envoie des SMS via sms8.io quand des erreurs persistent
+# SMSNotifier — envoie des SMS via Anyone SMS Relay quand des erreurs persistent
 # ─────────────────────────────────────────────────────────────────────────────
 
 import re as _re
 import urllib.parse as _urlparse
 
 class SMSNotifier:
-    """Envoie des SMS via l'API sms8.io pour chaque erreur persistante.
+    """Envoie des SMS via Anyone SMS Relay (sms-01.anyone-internal.com).
 
     Logique anti-spam :
       - Une erreur doit durer >= min_duration_s avant déclenchement
       - Cooldown de cooldown_s entre 2 SMS pour la MÊME erreur (clé = type+source)
       - Quand l'erreur disparaît, son état est nettoyé pour repartir à zéro
     """
-
-    API_URL = "https://app.sms8.io/services/send.php"
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -1427,28 +1437,64 @@ class SMSNotifier:
         threading.Thread(target=self._send, args=(message,), daemon=True).start()
 
     def _send(self, message):
+        """Envoi via Anyone SMS Relay (sms-01.anyone-internal.com).
+        Auth Bearer avec api_key. Si phone_gateway_id est defini on l'utilise,
+        sinon phoneGatewaySelection='any' (auto-selection)."""
         try:
-            device = self.cfg.get("device", "")
-            params = {
-                "key":     self.cfg["api_key"],
-                "number":  self.cfg["recipient"],
-                "message": message,
-                "devices": json.dumps([device]) if device else "[]",
-                "type":    "sms",
-                "prioritize": "0",
+            api_key   = (self.cfg.get("api_key") or "").strip()
+            recipient = (self.cfg.get("recipient") or "").strip()
+            gw_id     = (self.cfg.get("phone_gateway_id") or "").strip()
+            base_url  = (self.cfg.get("relay_base_url") or
+                         "https://sms-01.anyone-internal.com").rstrip("/")
+
+            if not api_key or not recipient:
+                print("[sms] api_key ou recipient manquant")
+                return
+
+            url = f"{base_url}/api/upstream/messages/outbound"
+
+            # Idempotency key : empeche un double-envoi en cas de retry reseau.
+            # Hash sur message + minute pour identifier "meme alerte dans la meme minute"
+            import hashlib
+            idem = "obs-" + hashlib.sha256(
+                (message + time.strftime("%Y%m%d%H%M")).encode("utf-8")
+            ).hexdigest()[:24]
+
+            payload = {
+                "toPhoneNumber": recipient,
+                "messageText": message,
+                "idempotencyKey": idem,
+                # Alertes time-sensitive : expirent apres 10 min
+                # si pas dispatchees (sinon SMS arrive tardivement, peu utile)
+                "expiresAfterSeconds": 600,
             }
-            url = self.API_URL + "?" + _urlparse.urlencode(params)
-            req = urllib.request.Request(url, method="GET")
-            req.add_header("User-Agent", "curl/8.7.1")
-            req.add_header("Accept", "*/*")
-            # SSL context sans vérif : Python bundlé PyInstaller n'a pas les CA macOS
+            if gw_id:
+                payload["phoneGatewayId"] = gw_id
+            else:
+                payload["phoneGatewaySelection"] = "any"
+
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=body, method="POST")
+            req.add_header("Authorization", f"Bearer {api_key}")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "OBSMonitor")
+
             import ssl as _ssl
             ctx = _ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = _ssl.CERT_NONE
-            with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
-                body = r.read().decode("utf-8", errors="replace")[:200]
-                print(f"[sms] {r.status} → {message[:60]}  | {body[:80]}")
+
+            try:
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+                    resp = r.read().decode("utf-8", errors="replace")[:300]
+                    print(f"[sms] {r.status} → {message[:60]}  | {resp[:120]}")
+            except urllib.error.HTTPError as he:
+                err_body = ""
+                try:
+                    err_body = he.read().decode("utf-8", errors="replace")[:300]
+                except Exception:
+                    pass
+                print(f"[sms] HTTP {he.code} → {err_body}")
         except Exception as e:
             print(f"[sms] erreur envoi: {e}")
 
@@ -3907,7 +3953,7 @@ class OBSMonitorRumps(rumps.App):
                 ("Activer les notifications",         "notif_enabled",      "toggle", b.get("notif_enabled", True)),
                 ("Fréquence minimum entre notifs",    "notif_cooldown_min", "stepper", int(b.get("notif_cooldown_s", 1800)//60), 1, 240, 1, "minutes"),
             ]),
-            ("SMS (sms8.io)", [
+            ("SMS (Anyone Relay)", [
                 ("Activer les SMS",                   "sms_enabled",        "toggle", s.get("enabled", False)),
                 ("Clé API",                           "sms_api_key",        "text",   s.get("api_key", "")),
                 ("Périphérique  (ex : 9210|0)",       "sms_device",         "text",   s.get("device", "")),
@@ -4027,25 +4073,28 @@ class OBSMonitorRumps(rumps.App):
         )
 
     def _on_sms_config(self, _):
-        """Show SMS config dialog (api_key, device, recipient)."""
+        """Show SMS config dialog (api_key Bearer Relay, phone_gateway_id, recipient)."""
         try:
             s = self._cfg.setdefault("sms", dict(DEFAULT_CONFIG["sms"]))
-            current = f"{s.get('api_key','')}|{s.get('device','')}|{s.get('recipient','')}"
+            current = f"{s.get('api_key','')}|{s.get('phone_gateway_id','')}|{s.get('recipient','')}"
             w = rumps.Window(
-                title="Configuration SMS (sms8.io)",
-                message="Format : APIKEY|DEVICE|+33XXXXXXXXX\n(device = ID|simSlot, ex : 9210|0)",
+                title="Configuration SMS (Anyone Relay)",
+                message=("Format : UPSTREAM_KEY|PHONE_GATEWAY_ID|+33XXXXXXXXX\n"
+                         "UPSTREAM_KEY commence par uk_…\n"
+                         "PHONE_GATEWAY_ID commence par pgw_… (vide = auto-selection)"),
                 default_text=current,
                 ok="Enregistrer",
                 cancel="Annuler",
-                dimensions=(420, 60),
+                dimensions=(500, 80),
             )
             resp = w.run()
             if resp.clicked:
                 parts = resp.text.strip().split("|")
                 if len(parts) >= 3:
-                    s["api_key"]   = parts[0].strip()
-                    s["device"]    = parts[1].strip()
-                    s["recipient"] = "|".join(parts[2:]).strip()
+                    s["api_key"]          = parts[0].strip()
+                    s["phone_gateway_id"] = parts[1].strip()
+                    s["recipient"]        = "|".join(parts[2:]).strip()
+                    s.setdefault("relay_base_url", "https://sms-01.anyone-internal.com")
                     save_config(self._cfg)
                     rumps.notification(
                         title="OBS Monitor",
@@ -4504,7 +4553,7 @@ class OBSMonitorRumps(rumps.App):
         # macOS notifications
         self._maybe_notify(issues)
 
-        # SMS via sms8.io
+        # SMS via Anyone Relay
         try:
             # Détecter une perte de connexion OBS → SMS one-shot
             if self._was_connected and not self._connected:

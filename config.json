@@ -33,8 +33,9 @@
   },
   "sms": {
     "enabled": true,
-    "api_key": "d1e24128aa9c26a1adfcf1c592fb9ecd0d6e7eb9",
-    "device": "9210|1",
+    "api_key": "uk_49e1ff2f612149c8b2b20f3f39332a49.8a105619ec32ce86e4db65925e98b9701e721f8516c5a683",
+    "phone_gateway_id": "",
+    "relay_base_url": "https://sms-01.anyone-internal.com",
     "recipient": "+33632548891",
     "cooldown_s": 600,
     "min_duration_s": 30,
