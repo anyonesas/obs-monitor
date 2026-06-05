@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.66"
+VERSION      = "2.5.67"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -228,15 +228,19 @@ def load_config():
     else:
         for k, v in DEFAULT_CONFIG["sms"].items():
             c["sms"].setdefault(k, v)
-        # v2.5.64 : migration sms8 → Anyone Relay. Si l'ancien api_key sms8 est
-        # detecte (sans prefix uk_), on tente de le remplacer par la cle Relay
-        # bundlee dans le .app. Sinon reset + disable.
+        # v2.5.64-67 : migration sms8 → Anyone Relay.
+        # On veut une cle uk_xxx valide dans le user config. Si elle est
+        # manquante ou si c'est une vieille cle sms8, on la remplace par la
+        # cle Relay bundlee dans le .app (config.json embarque).
         s = c["sms"]
-        if s.get("api_key") and not s["api_key"].startswith("uk_"):
+        cur_key = (s.get("api_key") or "").strip()
+        needs_inject = (not cur_key) or (not cur_key.startswith("uk_"))
+        if needs_inject:
             try:
                 bundled_sms = _bundled_config().get("sms", {})
-                bundled_key = (bundled_sms.get("api_key") or "")
+                bundled_key = (bundled_sms.get("api_key") or "").strip()
             except Exception:
+                bundled_sms = {}
                 bundled_key = ""
             if bundled_key.startswith("uk_"):
                 s["api_key"]          = bundled_key
@@ -244,13 +248,20 @@ def load_config():
                 s["relay_base_url"]   = bundled_sms.get(
                     "relay_base_url", "https://sms-01.anyone-internal.com"
                 )
+                # Si le user avait deja une cle sms8 (et donc enabled=True), on
+                # garde enabled=True. Si c'etait vide+disabled, on reactive
+                # automatiquement aussi puisqu'on injecte une cle valide.
+                s.setdefault("enabled", True)
+                if not s.get("recipient"):
+                    s["recipient"] = bundled_sms.get("recipient", "")
                 s.pop("device", None)
-                _dlog(f"[sms] legacy sms8 key remplacee par cle Relay bundlee")
-            else:
+                _dlog(f"[sms] cle Relay bundlee injectee (avant: {cur_key[:10]!r})")
+            elif cur_key:
+                # Pas de bundle → on disable au moins l'envoi vers le mauvais endpoint
                 s["api_key"] = ""
                 s.pop("device", None)
                 s["enabled"] = False
-                _dlog(f"[sms] legacy sms8 key reset (pas de cle bundlee)")
+                _dlog(f"[sms] cle legacy sans bundle Relay → reset+disable")
     # Banner defaults
     if "banner" not in c:
         c["banner"] = dict(DEFAULT_CONFIG["banner"])
