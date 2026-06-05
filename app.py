@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.67"
+VERSION      = "2.5.68"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -4173,7 +4173,8 @@ class OBSMonitorRumps(rumps.App):
             print(f"[sms_hours] {e}")
 
     def _on_sms_test(self, _):
-        """Send a test SMS immediately, ignoring cooldown."""
+        """Envoie un SMS de test immediat, en bypassant cooldown, plage horaire
+        et flag enabled (un test est par definition manuel)."""
         s = self._cfg.get("sms", {})
         if not s.get("api_key") or not s.get("recipient"):
             rumps.notification(
@@ -4183,14 +4184,13 @@ class OBSMonitorRumps(rumps.App):
                 sound=False,
             )
             return
-        # Bypass cooldown by clearing last_sent for the test key
-        with self._sms._lock:
-            self._sms._last_sent.pop("__test__", None)
-        self._sms.notify_event("__test__", f"OBS Monitor v{VERSION} — SMS de test ✓")
+        # Bypass TOUT : appelle _send_async directement (sans passer par
+        # notify_event qui check enabled/window/cooldown).
+        self._sms._send_async(f"OBS Monitor v{VERSION} — SMS de test ✓")
         rumps.notification(
             title="OBS Monitor",
             subtitle="",
-            message="SMS de test envoyé",
+            message="SMS de test envoyé (regarde panel.log si tu reçois rien)",
             sound=False,
         )
 
