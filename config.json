@@ -37,7 +37,7 @@
     "phone_gateway_id": "",
     "relay_base_url": "https://sms-01.anyone-internal.com",
     "recipient": "+33632548891",
-    "cooldown_s": 600,
+    "cooldown_s": 1800,
     "min_duration_s": 30,
     "send_from": "10:00",
     "send_until": "18:30"

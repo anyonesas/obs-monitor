@@ -4,7 +4,7 @@ OBS Monitor v2.0 — Native macOS NSPanel + rumps menu bar
 Panneau flottant natif (AppKit NSPanel) + icône barre de menu (rumps).
 """
 
-VERSION      = "2.5.68"
+VERSION      = "2.5.69"
 GITHUB_REPO  = "anyonesas/obs-monitor"
 UPDATE_API   = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -171,7 +171,7 @@ DEFAULT_CONFIG = {
         "phone_gateway_id": "",      # pgw_xxx (vide = auto-selection)
         "relay_base_url": "https://sms-01.anyone-internal.com",
         "recipient": "",             # ex: "+33632548891"
-        "cooldown_s": 600,           # 10 min entre SMS pour la même erreur
+        "cooldown_s": 1800,          # 30 min entre SMS pour la même erreur
         "min_duration_s": 30,        # erreur doit durer 30s avant SMS
         "send_from": "10:00",
         "send_until": "18:30",
@@ -262,6 +262,11 @@ def load_config():
                 s.pop("device", None)
                 s["enabled"] = False
                 _dlog(f"[sms] cle legacy sans bundle Relay → reset+disable")
+        # v2.5.69 : ancien cooldown 600s (10 min) → 1800s (30 min) si l'user
+        # n'a pas customise (laisse a 600 = ancien defaut).
+        if s.get("cooldown_s") == 600:
+            s["cooldown_s"] = 1800
+            _dlog(f"[sms] cooldown 600s → 1800s (nouveau defaut)")
     # Banner defaults
     if "banner" not in c:
         c["banner"] = dict(DEFAULT_CONFIG["banner"])
